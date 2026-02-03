@@ -2,40 +2,25 @@ def fetch_stock_history(symbol):
     if not symbol.isdigit() or len(symbol) != 6:
         return None
         
-    prefix = 'sh' if symbol.startswith('6') else 'sz'
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
-    
+    # 函数：用 yfinance 拉 A股数据（Yahoo Finance 对香港友好）
+def fetch_stock_data(symbol):
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # 检查 HTTP 错误
-        raw = response.json()
+        # A股在 Yahoo 用 .SS (上证) 或 .SZ (深证)
+        ticker = f"{symbol}.SS" if symbol.startswith('6') else f"{symbol}.SZ"
+        stock = yf.Ticker(ticker)
         
-        # 安全提取数据：腾讯接口有时 data 是 { "sh600519": { "qfqday": [...] } }
-        data_section = raw.get('data', {})
-        stock_data = data_section.get(f"{prefix}{symbol}", {}) \
-                                 .get('qfqday', []) \
-                      or data_section.get(f"{prefix}{symbol}", {}) \
-                                 .get('day', [])
+        # 实时信息
+        info = stock.info
+        name = info.get('shortName', '未知股票')
+        current = info.get('currentPrice', info.get('regularMarketPrice', 0.0))
         
-        if not stock_data:
-            # 尝试另一种可能的嵌套结构（有些版本返回在 'data' 下还有一次嵌套）
-            inner = data_section.get('', {})  # 注意：有时 key 是空字符串！
-            if isinstance(inner, dict):
-                stock_data = inner.get('qfqday', []) or inner.get('day', [])
+        # 历史 K线（最近 365 天）
+        hist = stock.history(period="1y", interval="1d")
+        if hist.empty:
+            raise ValueError("无历史数据")
         
-        if not stock_data:
-            st.warning(f"⚠️ {symbol}：接口返回空数据，可能是股票代码错误或接口限制。")
-            return None
-
-        df = pd.DataFrame(stock_data, columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
-        for col in ['open', 'close', 'high', 'low', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.dropna(inplace=True)
-
-        if df.empty:
-            return None
+        df = hist[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df.columns = ['open', 'high', 'low', 'close', 'volume']
 
         # 计算技术指标
         df['ma20'] = df['close'].rolling(20).mean()
