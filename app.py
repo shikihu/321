@@ -16,15 +16,13 @@ def fetch_stock_history(symbol):
         response.raise_for_status()
         raw = response.json()
         
-        # 安全提取数据：处理 key 为空字符串 "" 的情况（常见于腾讯接口）
+        # 安全提取数据：处理 key 为空字符串 "" 的情况
         data_section = raw.get('data', {})
         stock_key = f"{prefix}{symbol}"
         stock_data = []
 
-        # 尝试正常 key
         if stock_key in data_section:
             stock_data = data_section[stock_key].get('qfqday', []) or data_section[stock_key].get('day', [])
-        # 尝试空字符串 key（如 {"data": {"": {...}} }）
         elif "" in data_section:
             inner = data_section[""]
             if isinstance(inner, dict):
@@ -34,12 +32,21 @@ def fetch_stock_history(symbol):
             st.warning(f"⚠️ {symbol}：未获取到K线数据，请检查代码或稍后再试。")
             return None
 
-        # 创建 DataFrame 并立即复制，避免 SettingWithCopyWarning
-        df = pd.DataFrame(stock_data, columns=['date', 'open', 'close', 'high', 'low', 'volume']).copy()
+        # ✅ 关键修复：不再硬编码列名，而是动态取前6列或指定列
+        df = pd.DataFrame(stock_data)
+        
+        # 确保至少有6列（date, open, close, high, low, volume）
+        if df.shape[1] < 6:
+            st.error(f"❌ {symbol} 数据列数不足（只有 {df.shape[1]} 列）")
+            return None
+            
+        # 自动匹配列：取前6列并命名（腾讯接口通常顺序固定）
+        df = df.iloc[:, :6].copy()
+        df.columns = ['date', 'open', 'close', 'high', 'low', 'volume']
+        
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
         
-        # 转换数值类型，错误转为 NaN 后删除
         for col in ['open', 'close', 'high', 'low', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
@@ -58,10 +65,10 @@ def fetch_stock_history(symbol):
         df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
         df['macd'] = (df['dif'] - df['dea']) * 2
 
-        # KDJ（加防除零）
+        # KDJ（防除零）
         low_min = df['low'].rolling(9).min()
         high_max = df['high'].rolling(9).max()
-        denominator = (high_max - low_min).replace(0, 1)  # 防止除零
+        denominator = (high_max - low_min).replace(0, 1)
         rsv = (df['close'] - low_min) / denominator * 100
         df['k'] = rsv.ewm(span=3, adjust=False).mean()
         df['d'] = df['k'].ewm(span=3, adjust=False).mean()
@@ -90,9 +97,9 @@ def analyze_stock(symbol, df):
     prev = df.iloc[-2]
     ma20 = last['ma20']
     
-    # 首次回踩判断 (B1核心) —— 修复越界问题
+    # 首次回踩判断 (B1核心)
     ma20_break_idx = -1
-    for i in range(len(df)-2, 0, -1):  # 从倒数第2天到第1天（避免 i=0 时 i-1=-1）
+    for i in range(len(df)-2, 0, -1):
         if df['close'].iloc[i] > df['ma20'].iloc[i] and df['close'].iloc[i-1] <= df['ma20'].iloc[i-1]:
             ma20_break_idx = i
             break
@@ -117,10 +124,9 @@ def analyze_stock(symbol, df):
     is_b2 = (last['close'] == df['high'].rolling(60).max().iloc[-1]) and last['macd'] > 0 and qty_price_match
     
     # 陷阱过滤
-    fake_break = any(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) and last['close'] > ma20
     real_trap = sum(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) > 2 and not volume_shrink
     
-    # 完美图形（放宽涨幅限制）
+    # 完美图形
     price_range = (df['high'].iloc[-60:].max() / df['low'].iloc[-60:].min() - 1)
     perfect_pattern = is_first_pullback and volume_shrink and key_k and last['bbi'] > prev['bbi'] and price_range <= 1.5
     
@@ -133,7 +139,7 @@ def analyze_stock(symbol, df):
         'MACD多头': last['macd'] > 0,
         'KDJ超卖': kdj_oversold,
         '股性活跃': df['close'].pct_change().abs().mean() > 0.02,
-        '主流题材': True,  # 可手动扩展
+        '主流题材': True,
         '首次回踩': is_first_pullback,
         'J值极低': j_extreme,
         '量价配合': qty_price_match,
