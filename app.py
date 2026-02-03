@@ -40,7 +40,7 @@ def fetch_stock_history(symbol):
     except:
         return None
 
-# 函数：Z哥战法分析 (模拟 AI Z哥)
+# 函数：Z哥战法分析（模拟 AI Z哥）
 def analyze_stock(symbol, df):
     if df is None:
         return {"error": "无法获取数据"}
@@ -63,68 +63,68 @@ def analyze_stock(symbol, df):
     peak_vol = df['volume'].iloc[-60:-30].max() if len(df) > 60 else df['volume'].max()
     vol_ratio = last['volume'] / peak_vol if peak_vol > 0 else 1
     volume_shrink = vol_ratio < 0.35
-    qty_price_match = (last['close'] > prev['close'] and last['volume'] > prev['volume']) or (volume_shrink and is_first_pullback)  # 量价齐升 or 缩量
+    qty_price_match = (last['close'] > prev['close'] and last['volume'] > prev['volume']) or (volume_shrink and is_first_pullback)
     
     # KDJ & 关键K
     j_extreme = last['j'] < -1
     kdj_oversold = last['j'] < 20
-    key_k = (last['close'] - last['open']) / last['open'] > 0.03 and last['volume'] > df['volume'].rolling(5).mean().iloc[-1]  # 阳线放量确认
+    key_k = (last['close'] - last['open']) / last['open'] > 0.03 and last['volume'] > df['volume'].rolling(5).mean().iloc[-1]
     
-    # B2 买点 (主升浪)
+    # B2 买点
     is_b2 = df['close'].iloc[-1] == df['high'].rolling(60).max().iloc[-1] and last['macd'] > 0 and qty_price_match
     
-    # 陷阱过滤 (击穿对手盘)
-    fake_break = any(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) and last['close'] > ma20  # 破位但收回 = 假陷阱
-    real_trap = sum(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) > 2 and not volume_shrink  # 多次破 + 不缩 = 真陷阱
+    # 陷阱过滤
+    fake_break = any(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) and last['close'] > ma20
+    real_trap = sum(df['close'].iloc[-5:] < df['ma20'].iloc[-5:]) > 2 and not volume_shrink
     
-    # 完美图形 (选美)
+    # 完美图形
     perfect_pattern = is_first_pullback and volume_shrink and key_k and last['bbi'] > prev['bbi'] and (df['high'].iloc[-60:].max() / df['low'].iloc[-60:].min() - 1) <= 1.0
     
     # 打分 & 符合度
     b1_criteria = {
-        'trendUp': last['ma20'] > prev['ma20'],
-        'volumeShrink': volume_shrink,
-        'supportValid': last['close'] > ma20 * 0.98,
-        'noBigGreen': (last['close'] - last['open']) / last['open'] < 0.07,
-        'macdBullish': last['macd'] > 0,
-        'kdjOversold': kdj_oversold,
-        'isActive': df['close'].pct_change().abs().mean() > 0.02,
-        'isMainstream': True,  # 假设，用户可手动
-        'isFirstPullback': is_first_pullback,
-        'jExtreme': j_extreme,
-        'qtyPriceMatch': qty_price_match,
-        'keyK': key_k,
-        'bbiUp': last['bbi'] > prev['bbi'],
-        'perfectPattern': perfect_pattern,
-        'noRealTrap': not real_trap
+        '趋势向上': last['ma20'] > prev['ma20'],
+        '缩量明显': volume_shrink,
+        '支撑有效': last['close'] > ma20 * 0.98,
+        '无大阴线': (last['close'] - last['open']) / last['open'] < 0.07,
+        'MACD多头': last['macd'] > 0,
+        'KDJ超卖': kdj_oversold,
+        '股性活跃': df['close'].pct_change().abs().mean() > 0.02,
+        '主流题材': True,  # 可手动输入
+        '首次回踩': is_first_pullback,
+        'J值极低': j_extreme,
+        '量价配合': qty_price_match,
+        '关键K线': key_k,
+        'BBI上升': last['bbi'] > prev['bbi'],
+        '完美图形': perfect_pattern,
+        '无真陷阱': not real_trap
     }
-    score = sum(b1_criteria.values()) * 7  # 约15项，满分105，规范到100
+    score = sum(b1_criteria.values()) * 7
     score = min(score, 100)
     
-    # Z哥式总结 & 建议
+    # Z哥式中文总结 & 建议
     if real_trap:
-        summary = "警惕主力陷阱！多次破位不缩量，击穿对手盘真出货，别碰。"
-        buy_advice = "不能买，等待下一个机会。"
+        summary = "小心主力陷阱！多次破位还不缩量，击穿对手盘真出货，别碰！"
+        buy_advice = "不能买，等下一个机会。"
     elif score >= 80 and (is_first_pullback or is_b2):
-        summary = "完美一号！符合少妇战法低买点：首踩/B2 + 缩量 + J负 + 关键K确认，温柔黏人，赚钱机会大。"
-        buy_advice = "能买，低吸！按六步法：择时后选股买入，持等利润垫。"
+        summary = "完美一号！符合少妇战法低买点：首踩/B2 + 缩量 + J负 + 关键K确认，温柔黏人，赚钱机会很大。"
+        buy_advice = "可以买，低吸！按六步法：择时后选股买入，持仓等利润垫。"
     elif score >= 60:
-        summary = "疑似好票，但量价/J值未完全到位，观察放量确认或 B2 主升。"
-        buy_advice = "可买，但小仓试水。注意假突破陷阱。"
+        summary = "疑似好票，但量价或 J 值还没完全到位，观察放量确认或等 B2 主升。"
+        buy_advice = "可以小仓试水，但注意假突破陷阱。"
     else:
-        summary = "不符合 Z哥铁律，非首踩或量未缩，告别无效盯盘，别折腾子弹。"
-        buy_advice = "不能买，复盘等待更好机会。"
+        summary = "不符合 Z哥铁律，不是首踩或者量没缩到位，告别无效盯盘，别折腾子弹。"
+        buy_advice = "不能买，复盘等待更好的机会。"
     
     # 卖点 & 心态
-    sell_tips = "卖出参考：1. 利润垫出现；2. 破 MA20/60；3. 情绪高潮/放量滞涨；4. 四种卖法。心态：沉没成本不决策，戒骄戒躁，珍惜子弹。"
+    sell_tips = "卖出参考：1. 利润垫出现；2. 破 MA20/60；3. 情绪高潮或放量滞涨；4. 四种卖法。心态：沉没成本别决策，戒骄戒躁，珍惜子弹！"
     
     metrics = [
-        {"label": "当前价", "value": round(last['close'], 2)},
-        {"label": "MA20", "value": round(ma20, 2)},
-        {"label": "MACD", "value": round(last['macd'], 2)},
-        {"label": "J 值", "value": round(last['j'], 2)},
-        {"label": "BBI", "value": round(last['bbi'], 2)},
-        {"label": "量比", "value": round(vol_ratio, 2)}
+        {"指标": "当前价", "数值": round(last['close'], 2)},
+        {"指标": "MA20", "数值": round(ma20, 2)},
+        {"指标": "MACD", "数值": round(last['macd'], 2)},
+        {"指标": "J 值", "数值": round(last['j'], 2)},
+        {"指标": "BBI", "数值": round(last['bbi'], 2)},
+        {"指标": "量比", "数值": round(vol_ratio, 2)}
     ]
     
     return {
@@ -142,28 +142,28 @@ def analyze_stock(symbol, df):
     }
 
 # 主界面
-st.title("Z哥 AI Analyst - 少妇 & B1 战法")
+st.title("Z哥 AI 分析师 - 少妇 & B1 战法")
 
-st.sidebar.title("Z哥六步法背诵")
+st.sidebar.title("Z哥六步法（背诵 100 遍）")
 st.sidebar.write("""
-1. 择时：周日看大盘温度。
-2. 选股：强势基因 + 题材热。
-3. 买点：B1首踩 or B2主升。
-4. 持仓：等利润垫，不折腾。
-5. 卖点：四种卖法 (利润/破位/高潮/情绪)。
-6. 复盘：每笔记录，避免情绪。
+1. 择时：周日看大盘温度，只在合适阶段动手  
+2. 选股：强势基因 + 题材热  
+3. 买点：B1首踩 或 B2主升  
+4. 持仓：等利润垫，不折腾  
+5. 卖点：四种卖法（利润垫/破位/高潮/情绪）  
+6. 复盘：每笔交易都要复盘，避免情绪化  
 """)
-st.sidebar.write("心态：沉没成本不决策，珍惜子弹！")
+st.sidebar.write("心态：沉没成本别参与决策，戒骄戒躁，珍惜子弹！")
 
-codes_input = st.text_input("输入股票代码 (逗号分隔，如 600519,000001)")
-if st.button("Z哥分析"):
+codes_input = st.text_input("输入股票代码（用逗号分隔，例如 600519,000001）")
+if st.button("让 Z哥分析"):
     if codes_input:
         codes = [c.strip() for c in codes_input.split(',')]
         for symbol in codes:
             st.subheader(f"Z哥看 {symbol}")
             df = fetch_stock_history(symbol)
             if df is None:
-                st.error(f"无法获取 {symbol} 数据。")
+                st.error(f"无法获取 {symbol} 的数据，请检查代码或网络。")
                 continue
             
             # K 线图
@@ -171,28 +171,28 @@ if st.button("Z哥分析"):
                                                  open=df['open'], high=df['high'],
                                                  low=df['low'], close=df['close'],
                                                  increasing_line_color='red', decreasing_line_color='green')])
-            fig.add_trace(go.Scatter(x=df.index, y=df['ma20'], mode='lines', name='MA20', line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=df.index, y=df['ma60'], mode='lines', name='MA60', line=dict(color='yellow')))
-            fig.update_layout(title=f"{symbol} K线图 (盯关键K)", xaxis_rangeslider_visible=True)
+            fig.add_trace(go.Scatter(x=df.index, y=df['ma20'], mode='lines', name='MA20（生命线）', line=dict(color='blue')))
+            fig.add_trace(go.Scatter(x=df.index, y=df['ma60'], mode='lines', name='MA60（长期线）', line=dict(color='yellow')))
+            fig.update_layout(title=f"{symbol} K线图（重点盯关键K）", xaxis_rangeslider_visible=True)
             st.plotly_chart(fig)
             
-            # 分析
+            # 分析结果
             analysis = analyze_stock(symbol, df)
             if "error" in analysis:
                 st.error(analysis["error"])
             else:
-                st.write("**Z哥分数：**", analysis['score'])
+                st.write("**Z哥打分：**", analysis['score'])
                 st.write("**Z哥总结：**", analysis['summary'])
                 st.write("**能不能买？**", analysis['buyAdvice'])
-                st.write("**看多因素：**", ", ".join(analysis['bullishFactors']))
-                st.write("**看空因素：**", ", ".join(analysis['bearishFactors']))
+                st.write("**看多因素：**", "、".join(analysis['bullishFactors']))
+                st.write("**看空因素：**", "、".join(analysis['bearishFactors']))
                 st.write("**卖出提醒：**", analysis['sellTips'])
                 st.table(pd.DataFrame(analysis['metrics']))
-                st.write("**B1/B2 Checklist：**")
+                st.write("**B1/B2 检查清单：**")
                 for k, v in analysis['b1Criteria'].items():
-                    st.write(f"- {k}: {'✅' if v else '❌'}")
+                    st.write(f"- {k}：{'✅' if v else '❌'}")
 
-st.sidebar.title("使用说明")
-st.sidebar.write("- 输入代码，Z哥帮你判是否符合少妇/B1。")
-st.sidebar.write("- 基于视频提炼，本地计算，无限用。")
-st.sidebar.write("- 炒股风险自负，仅参考。")
+st.sidebar.title("使用小贴士")
+st.sidebar.write("- 输入股票代码，Z哥帮你判是否符合少妇/B1战法")
+st.sidebar.write("- 数据实时获取，本地计算，无需 API 密钥，无限使用")
+st.sidebar.write("- 炒股有风险，仅供参考，不构成投资建议")
