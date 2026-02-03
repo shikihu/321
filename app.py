@@ -3,29 +3,54 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 
-# 函数：获取 A 股历史数据
+# 函数：获取 A 股历史数据（使用东方财富接口，更稳定）
 def fetch_stock_history(symbol):
-    prefix = 'sh' if symbol.startswith('6') else 'sz'
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,365,qfq"
+    # 东方财富 secid：沪市用 1. 前缀，深市用 0. 前缀，北京用 2. 前缀
+    if symbol.startswith('6'):
+        secid = f"1.{symbol}"
+    elif symbol.startswith('0') or symbol.startswith('3'):
+        secid = f"0.{symbol}"
+    elif symbol.startswith('4') or symbol.startswith('8'):
+        secid = f"2.{symbol}"
+    else:
+        secid = f"1.{symbol}"  # 默认沪市
+    
+    url = f"http://push2.eastmoney.com/api/qt/stock/kline?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&lmt=365"
+    
     try:
-        response = requests.get(url)
-        data = response.json().get('data', {}).get(f"{prefix}{symbol}", {}).get('qfqday', [])
-        if not data:
+        response = requests.get(url, timeout=15)
+        if response.status_code != 200:
             return None
-        df = pd.DataFrame(data, columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+        
+        data = response.json()
+        if 'data' not in data or 'klines' not in data['data']:
+            return None
+        
+        klines = data['data']['klines']
+        if not klines:
+            return None
+        
+        # 格式：date,open,close,high,low,volume,成交额,振幅,涨跌幅,涨跌额,换手率
+        rows = [line.split(',') for line in klines]
+        df = pd.DataFrame(rows, columns=['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'amp', 'pct_chg', 'chg', 'turnover'])
+        df = df[['date', 'open', 'close', 'high', 'low', 'volume']]
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
+        
         for col in ['open', 'close', 'high', 'low', 'volume']:
-            df[col] = pd.to_numeric(df[col])
-        # 计算指标
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 计算技术指标
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma60'] = df['close'].rolling(60).mean()
+        
         # MACD
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         df['dif'] = ema12 - ema26
         df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
         df['macd'] = (df['dif'] - df['dea']) * 2
+        
         # KDJ
         low_min = df['low'].rolling(9).min()
         high_max = df['high'].rolling(9).max()
@@ -33,11 +58,14 @@ def fetch_stock_history(symbol):
         df['k'] = rsv.ewm(span=3, adjust=False).mean()
         df['d'] = df['k'].ewm(span=3, adjust=False).mean()
         df['j'] = 3 * df['k'] - 2 * df['d']
+        
         # BBI
         df['bbi'] = (df['close'].rolling(3).mean() + df['close'].rolling(6).mean() + 
                      df['close'].rolling(12).mean() + df['close'].rolling(24).mean()) / 4
+        
         return df
-    except:
+    except Exception as e:
+        print(f"获取 {symbol} 数据失败: {str(e)}")
         return None
 
 # 函数：Z哥战法分析（模拟 AI Z哥）
@@ -155,7 +183,7 @@ st.sidebar.write("""
 """)
 st.sidebar.write("心态：沉没成本别参与决策，戒骄戒躁，珍惜子弹！")
 
-codes_input = st.text_input("输入股票代码（用逗号分隔，例如 600519,000001）")
+codes_input = st.text_input("输入股票代码（用逗号分隔，例如 600519,000001,601218）")
 if st.button("让 Z哥分析"):
     if codes_input:
         codes = [c.strip() for c in codes_input.split(',')]
@@ -163,7 +191,7 @@ if st.button("让 Z哥分析"):
             st.subheader(f"Z哥看 {symbol}")
             df = fetch_stock_history(symbol)
             if df is None:
-                st.error(f"无法获取 {symbol} 的数据，请检查代码或网络。")
+                st.error(f"无法获取 {symbol} 的数据，请稍后重试或检查网络。")
                 continue
             
             # K 线图
@@ -194,5 +222,5 @@ if st.button("让 Z哥分析"):
 
 st.sidebar.title("使用小贴士")
 st.sidebar.write("- 输入股票代码，Z哥帮你判是否符合少妇/B1战法")
-st.sidebar.write("- 数据实时获取，本地计算，无需 API 密钥，无限使用")
+st.sidebar.write("- 数据来自东方财富，实时获取，本地计算，无需密钥，无限使用")
 st.sidebar.write("- 炒股有风险，仅供参考，不构成投资建议")
