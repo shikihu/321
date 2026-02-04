@@ -18,17 +18,12 @@ def fetch_stock_data(symbol):
         return None, name, current, market_cap
     
     df = hist[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    df.columns = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOL']
-    df['C'] = df['CLOSE']
-    df['O'] = df['OPEN']
-    df['H'] = df['HIGH']
-    df['L'] = df['LOW']
-    df['V'] = df['VOL']
+    df.columns = ['O', 'H', 'L', 'C', 'V']
     
     return df, name, current, market_cap
 
-# 函数：计算指标
-def calculate_indicators(df):
+# 函数：计算指标和条件
+def calculate_indicators_and_conditions(df):
     # 参数
     Z1 = 2
     Z2 = 0
@@ -50,28 +45,27 @@ def calculate_indicators(df):
                    df['C'].ewm(span=56, adjust=False).mean().ewm(span=56, adjust=False).mean()) / 4
     
     # 振幅区间原始
-    code_prefix = symbol[0:2]  # 假设 symbol 是字符串
-    is_special = code_prefix in ['68', '30', '4', '8', '9'] or (df['C'] / df['C'].shift(1) > 1.15).any()
+    is_special = symbol.startswith(('68', '30', '4', '8', '9')) or (df['C'] / df['C'].shift(1) > 1.15).any()
     振幅区间原始 = 8 if is_special else 5
     振幅区间 = 振幅区间原始 + Z2
     涨跌放宽系数 = 0.9 if is_special else 1
     df['当日振幅'] = (df['H'] - df['L']) / df['L'] * 100
-    df['当日涨跌幅'] = abs(df['C'] - df['C'].shift(1)) / df['C'].shift(1) * 100 * 涨跌放宽系数
-    df['上涨十字星'] = (df['C'] > df['C'].shift(1)) & (abs(df['C'] - df['O']) / df['O'] * 100 * 涨跌放宽系数 < 1.8)
+    df['当日涨跌幅'] = np.abs(df['C'] - df['C'].shift(1)) / df['C'].shift(1) * 100 * 涨跌放宽系数
+    df['上涨十字星'] = (df['C'] > df['C'].shift(1)) & (np.abs(df['C'] - df['O']) / df['O'] * 100 * 涨跌放宽系数 < 1.8)
     
     # SHORT 和 LONG
     df['SHORT'] = 100 * (df['C'] - df['L'].rolling(3).min()) / (df['H'].rolling(3).max() - df['L'].rolling(3).min())
     df['LONG'] = 100 * (df['C'] - df['L'].rolling(21).min()) / (df['H'].rolling(21).max() - df['L'].rolling(21).min())
     df['单针下20'] = (df['SHORT'] <= 20 & df['LONG'] >= 75) | ((df['LONG'] - df['SHORT']) >= 70)
     df['聚宝盆'] = (df['LONG'] >= 75).rolling(8).sum() >= 6 & (df['SHORT'] <= 70).rolling(7).sum() >= 4 & (df['SHORT'] <= 50).rolling(8).sum() >= 1
-    df['双叉戟'] = (df['LONG'] >= 75).rolling(8).min() == 8 & (df['SHORT'] <= 50).rolling(6).sum() >= 2 & (df['SHORT'] <= 20).rolling(7).sum() >= 1
+    df['双叉戟'] = (df['LONG'] >= 75).rolling(8).min() == 1 & (df['SHORT'] <= 50).rolling(6).sum() >= 2 & (df['SHORT'] <= 20).rolling(7).sum() >= 1
     df['红肥绿瘦'] = (df['C'] >= df['O']).rolling(15).sum() > 7 | (df['C'] > df['C'].shift(1)).rolling(11).sum() > 5
     
     # 大绿棒和缩量
-    VDAY = df['V'].rolling(40).idxmax()
-    df['不是大绿棒'] = df['C'].shift(VDAY.astype(int)) >= df['C'].shift(VDAY.astype(int) + 1) | df['C'].shift(VDAY.astype(int)) >= df['O'].shift(VDAY.astype(int))
+    df['VDAY'] = df['V'].rolling(40).idxmax()
+    df['不是大绿棒'] = df['C'].shift(df['VDAY'].astype(int)) >= df['C'].shift(df['VDAY'].astype(int) + 1) | df['C'].shift(df['VDAY'].astype(int)) >= df['O'].shift(df['VDAY'].astype(int))
     df['大绿棒'] = ~df['不是大绿棒']
-    df['大绿棒离得远'] = VDAY >= 15 & df['大绿棒']
+    df['大绿棒离得远'] = df['VDAY'] >= 15 & df['大绿棒']
     df['缩量'] = (df['V'] < df['V'].rolling(20).max() * 0.416) | (df['V'] < df['V'].rolling(50).max() / 3)
     df['回踩缩量'] = (df['V'] < df['V'].rolling(20).max() * 0.45) | (df['V'] < df['V'].rolling(50).max() / 3)
     df['适当缩量'] = (df['V'] < df['V'].rolling(20).max() * 0.618) | (df['V'] < df['V'].rolling(50).max() / 3)
@@ -88,21 +82,21 @@ def calculate_indicators(df):
     df['RSI'] = TEMP1.rolling(3).mean() / TEMP2.rolling(3).mean() * 100
     
     # 振幅
-    LOW N = df['L'].rolling(N).min()
-    HIGHN = df['H'].rolling(N).max()
-    近期振幅 = (HIGHN - LOWN) / LOWN * 100
-    近期异动 = 近期振幅 >= 15 | (df['H'].rolling(12).max() - df['L'].rolling(14).min()) / df['L'].rolling(14).min() * 100 >= 11
-    LOWM = df['L'].rolling(M).min()
-    HIGHM = df['H'].rolling(M).max()
-    远期振幅 = (HIGHM - LOWM) / LOWM * 100
-    远期异动 = 远期振幅 >= 30
-    超级异动 = 近期振幅 >= 60
-    洗盘异动 = (df['单针下20'].rolling(10).sum() >= 2) | df['聚宝盆'] | df['双叉戟']
+    df['LOWN'] = df['L'].rolling(N).min()
+    df['HIGHN'] = df['H'].rolling(N).max()
+    df['近期振幅'] = (df['HIGHN'] - df['LOWN']) / df['LOWN'] * 100
+    df['近期异动'] = df['近期振幅'] >= 15 | (df['H'].rolling(12).max() - df['L'].rolling(14).min()) / df['L'].rolling(14).min() * 100 >= 11
+    df['LOWM'] = df['L'].rolling(M).min()
+    df['HIGHM'] = df['H'].rolling(M).max()
+    df['远期振幅'] = (df['HIGHM'] - df['LOWM']) / df['LOWM'] * 100
+    df['远期异动'] = df['远期振幅'] >= 30
+    df['超级异动'] = df['近期振幅'] >= 60
+    df['洗盘异动'] = (df['单针下20'].rolling(10).sum() >= 2) | df['聚宝盆'] | df['双叉戟']
     
     # 趋势股
     df['做上涨趋势'] = df['趋势白线'] >= df['大哥黄线'] * 0.999 & (df['C'] >= df['大哥黄线'] | (df['C'] > df['大哥黄线'] * 0.975 & df['C'] > df['O']))
     df['强趋势股'] = (df['大哥黄线'] >= df['大哥黄线'].shift(1) * 0.999).rolling(13).min() == 1 & (df['趋势白线'] >= df['趋势白线'].shift(1)) & (df['趋势白线'] > df['大哥黄线']).rolling(20).min() == 1 & (df['趋势白线'] >= df['趋势白线'].shift(1)).rolling(11).min() == 1 & df['红肥绿瘦']
-    df['超牛股'] = ((df['BBI'] >= df['BBI'].shift(1) * 0.999).rolling(20).min() == 1 | (df['BBI'] >= df['BBI'].shift(1)).rolling(25).sum() >= 23) & (近期振幅 >= 30 | 远期振幅 > 80) & (df['C'] > df['大哥黄线']).shift().idxmax().dt.days > 12
+    df['超牛股'] = ((df['BBI'] >= df['BBI'].shift(1) * 0.999).rolling(20).min() == 1 | (df['BBI'] >= df['BBI'].shift(1)).rolling(25).sum() >= 23) & (df['近期振幅'] >= 30 | df['远期振幅'] > 80) & (df['C'] > df['大哥黄线']).shift().idxmax().dt.days > 12
     
     # 回踩白线
     df['距离白线'] = abs(df['C'] - df['趋势白线']) / df['C'] * 100
@@ -119,8 +113,9 @@ def calculate_indicators(df):
     
     # 条件计算
     df['超卖缩量拐头B'] = df['做上涨趋势'] & (df['RSI'] - 15) >= df['RSI'].shift(1) & (df['RSI'].shift(1) < 20 | df['J'].shift(1) < 14) & df['当日振幅'] < (振幅区间 + 0.5) & (df['当日涨跌幅'] < (2.3 + Z1) | (df['上涨十字星'] & df['当日涨跌幅'] < 4)) & (df['不是大绿棒'] | df['大绿棒离得远']) & (df['近期异动'] | df['远期异动'] | df['洗盘异动']) & df['C'] >= df['大哥黄线']
-    # 类似计算其他条件（超卖缩量B, 原始B1, 超卖超缩量B, 回踩白线B, 回踩超级B, 回踩黄线B）
-
+    df['超卖缩量B'] = df['做上涨趋势'] & (df['J'] < 14 | df['RSI'] < 23) & (df['RSI'] + df['J'] < 55 | df['J'] == df['J'].rolling(20).min()) & df['当日振幅'] < 振幅区间 & (df['当日涨跌幅'] < (2.5 + Z1) | df['上涨十字星']) & (df['不是大绿棒'] | df['大绿棒离得远']) & (df['缩量'] | (df['适当缩量'] & df['当日涨跌幅'] < 1)) & (df['近期异动'] | df['远期异动'] | df['洗盘异动'])
+    # 类似计算原始B1, 超卖超缩量B, 回踩白线B, 回踩超级B, 回踩黄线B (根据公式)
+    
     # 评分
     score = 0
     active_conditions = []
@@ -161,7 +156,7 @@ if st.button("让 Z哥分析"):
             st.error(f"无法获取 {symbol} 数据")
             continue
         
-        df = calculate_indicators(df)
+        df = calculate_indicators_and_conditions(df)
         
         score, comment, buy_advice, b1_criteria = analyze_stock(df, name, current)
         
@@ -170,12 +165,18 @@ if st.button("让 Z哥分析"):
         st.write("**能不能买？**", buy_advice)
         
         # K 线图
-        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['OPEN'], high=df['HIGH'], low=df['LOW'], close=df['CLOSE'], increasing_line_color='red', decreasing_line_color='green')])
-        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], name='趋势白线', line=dict(color='white')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], name='大哥黄线', line=dict(color='yellow')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBI'], name='BBI', line=dict(color='blue')))
-        fig.update_layout(title=f"{symbol} K线图", xaxis_rangeslider_visible=True, height=500)
-        st.plotly_chart(fig)
+        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['O'], high=df['H'], low=df['L'], close=df['C'], increasing_line_color='red', decreasing_line_color='green')])
+        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], name='趋势白线', line=dict(color='white', width=2)))
+        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], name='大哥黄线', line=dict(color='yellow', width=2)))
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBI'], name='BBI', line=dict(color='blue', width=2)))
+        fig.update_layout(title=f"{symbol} K线图", xaxis_rangeslider_visible=True, height=500, yaxis_title='价格', xaxis_title='日期')
+        fig.update_xaxes(rangeslider_visible=True, rangeselector=dict(buttons=list([
+            dict(count=1, label="1m", step="month", stepmode="backward"),
+            dict(count=6, label="6m", step="month", stepmode="backward"),
+            dict(count=1, label="YTD", step="year", stepmode="todate"),
+            dict(step="all")
+        ])))
+        st.plotly_chart(fig, use_container_width=True)
         
         st.write("**B1 检查清单：**")
         for k, v in b1_criteria.items():
