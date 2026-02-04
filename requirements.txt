@@ -1,5 +1,4 @@
-streamlit
+akshare
 pandas
 plotly
-requests
-yfinance
+streamlit
