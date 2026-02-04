@@ -3,3 +3,4 @@ pandas
 plotly
 streamlit>=1.40.0
 altair
+requests
