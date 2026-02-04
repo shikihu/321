@@ -34,14 +34,14 @@ def fetch_from_tencent(symbol):
        
         if not stock_data:
             return None
-        # ✅ 核心：只取每行前6个字段（无视第7列成交额）
+        # 核心：只取每行前6个字段
         cleaned = []
         for row in stock_data:
             if isinstance(row, list) and len(row) >= 6:
-                cleaned.append([str(x) for x in row[:6]])
+                cleaned.append(row[:6])
         if not cleaned:
             return None
-        df = pd.DataFrame(cleaned, columns=['date', 'open', 'close', 'high', 'low', 'volume']).copy()
+        df = pd.DataFrame(cleaned, columns=['date', 'open', 'close', 'high', 'low', 'volume'])
         df['date'] = pd.to_datetime(df['date'], errors='coerce')
         df.dropna(subset=['date'], inplace=True)
         df.set_index('date', inplace=True)
@@ -52,7 +52,7 @@ def fetch_from_tencent(symbol):
             return None
         return df
     except Exception as e:
-        # st.write(f"[腾讯] {symbol} 失败: {e}") # 调试时可打开
+        print(f"[腾讯] {symbol} 失败: {e}")
         return None
 
 def fetch_from_yfinance(symbol):
@@ -73,7 +73,7 @@ def fetch_from_yfinance(symbol):
             return None
         return df
     except Exception as e:
-        # st.write(f"[Yahoo] {symbol} 失败: {e}")
+        print(f"[Yahoo] {symbol} 失败: {e}")
         return None
 
 def fetch_stock_history(symbol):
@@ -91,10 +91,14 @@ def fetch_stock_history(symbol):
 def calculate_indicators(df):
     df = df.copy()
     
-    # 趋势线
+    # BBI
     df['BBI'] = (df['close'].rolling(3).mean() + df['close'].rolling(6).mean() + 
                  df['close'].rolling(12).mean() + df['close'].rolling(24).mean()) / 4
+    
+    # 趋势白线
     df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
+    
+    # 大哥黄线
     df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() + 
                    df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() + 
                    df['close'].ewm(span=28, adjust=False).mean().ewm(span=28, adjust=False).mean() + 
@@ -215,10 +219,10 @@ if st.button("让 Z哥分析"):
         
         # K 线图
         fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], increasing_line_color='red', decreasing_line_color='green')])
-        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], name='趋势白线'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], name='大哥黄线'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBI'], name='BBI'))
-        fig.update_layout(title=f"{symbol} K线图")
+        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], name='趋势白线', line=dict(color='white')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], name='大哥黄线', line=dict(color='yellow')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBI'], name='BBI', line=dict(color='blue')))
+        fig.update_layout(title=f"{symbol} K线图", xaxis_rangeslider_visible=True, height=500)
         st.plotly_chart(fig)
         
         st.write("**B1 检查清单：**")
