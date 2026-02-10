@@ -76,26 +76,29 @@ def fetch_stock_history(symbol):
     return df, source
 
 # ======================
-# 获取股票名称
+# 获取股票名称 + 流通市值（真实数据）
 # ======================
 @st.cache_data(ttl=3600)
-def get_stock_name(symbol):
+def get_stock_info(symbol):
     try:
         info = ak.stock_individual_info_em(symbol=symbol)
         name = info[info['项目'] == '股票简称']['值'].values[0]
-        return name
+        circ_mv = info[info['项目'] == '流通市值']['值'].values[0] / 100000000  # 转为亿元
+        return name, circ_mv
     except:
-        return symbol
+        return symbol, 100.0  # 默认 100 亿
 
 # ======================
-# 技术指标计算（简化，只计算必要列）
+# 技术指标计算
 # ======================
 def calculate_indicators(df):
     df = df.copy()
     
-    # 核心指标（用于判断）
+    # BBI
     df['BBI'] = (df['close'].rolling(3).mean() + df['close'].rolling(6).mean() + 
                  df['close'].rolling(12).mean() + df['close'].rolling(24).mean()) / 4
+    
+    # 趋势白线 & 大哥黄线
     df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
     df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() + 
                    df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() + 
@@ -131,15 +134,15 @@ def calculate_indicators(df):
     df['换手率'] = df['volume'] / (df['close'] * 100000000) * 100  # 粗估
     df['量比'] = df['volume'] / df['volume'].rolling(5).mean()
     
-    # 缩量系列（简化）
+    # 缩量系列
     df['缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.416) | (df['volume'] < df['volume'].rolling(50).max() / 3)
     
     return df
 
 # ======================
-# 浩哥战法分析（隐藏 B1 名词）
+# 浩哥战法分析
 # ======================
-def analyze_stock(df, name, current, market_cap):
+def analyze_stock(df, name, current, circ_mv):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -147,35 +150,35 @@ def analyze_stock(df, name, current, market_cap):
     def safe_get(col, default=False):
         return last.get(col, default) if col in last else default
     
-    # 核心判断（隐藏 B1 名词，只用内部逻辑）
+    # 核心判断
     dist_white = abs(last['close'] - last['趋势白线']) / last['趋势白线'] * 100 if '趋势白线' in last else 999
     dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100 if '大哥黄线' in last else 999
     
-    # 信号激活（内部计算，不显示名字）
+    # 信号激活（内部）
     signals = {
-        's1': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 3,  # 拐头
-        's2': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('当日振幅', 999) < 8 and safe_get('缩量', False),  # 缩量
-        's3': (last['趋势白线'] > last['大哥黄线']) and (safe_get('j') < 13 or safe_get('rsi') < 21) and safe_get('缩量', False),  # 原始
-        's4': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('缩量', False) and safe_get('远期振幅', 0) >= 45,  # 超缩
-        's5': (dist_white < 2) and safe_get('缩量', False),  # 回踩白
-        's6': safe_get('超牛股', False) and (safe_get('j') < 35 or safe_get('rsi') < 45) and safe_get('缩量', False),  # 超级
-        's7': (dist_yellow <= 1.5) and safe_get('缩量', False)  # 黄线
+        's1': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 3,
+        's2': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('当日振幅', 999) < 8 and safe_get('缩量', False),
+        's3': (last['趋势白线'] > last['大哥黄线']) and (safe_get('j') < 13 or safe_get('rsi') < 21) and safe_get('缩量', False),
+        's4': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('缩量', False) and safe_get('远期振幅', 0) >= 45,
+        's5': (dist_white < 2) and safe_get('缩量', False),
+        's6': safe_get('超牛股', False) and (safe_get('j') < 35 or safe_get('rsi') < 45) and safe_get('缩量', False),
+        's7': (dist_yellow <= 1.5) and safe_get('缩量', False)
     }
     
-    # 权重（不变）
+    # 权重
     weights = {
-        's6': 25,  # 超级
-        's4': 22,  # 超缩
-        's5': 18,  # 白线
-        's3': 15,  # 原始
-        's1': 10,  # 拐头
-        's7': 8,   # 黄线
-        's2': 5    # 缩量
+        's6': 25,
+        's4': 22,
+        's5': 18,
+        's3': 15,
+        's1': 10,
+        's7': 8,
+        's2': 5
     }
     
     tech_score = sum(weights.get(k, 0) for k, v in signals.items() if v)
     
-    # 低价修正
+    # 低价股修正
     price_correction = 0
     if current < 12:
         price_correction = -4
@@ -188,7 +191,7 @@ def analyze_stock(df, name, current, market_cap):
     
     # AI 分（模拟热点）
     ai_score = 0
-    if market_cap > 50:
+    if circ_mv > 50:
         ai_score += 8
     if current > 50:
         ai_score += 5
@@ -199,19 +202,22 @@ def analyze_stock(df, name, current, market_cap):
     total_score = min(total_score, 100)
     
     # 生动评论（浩哥口吻）
-    comment = f"浩哥瞅了瞅 {name}，当前价 {current:.2f} 元，流通市值 {market_cap:.2f} 亿。兄弟，这票今天有点意思啊……"
+    comment = f"浩哥瞅了瞅 {name}，当前价 {current:.2f} 元，流通市值 {circ_mv:.2f} 亿。"
     active_count = sum(1 for v in signals.values() if v)
     if active_count >= 3:
-        comment += f" 形态走得挺漂亮，几个关键点都对上了，浩哥看这走势有点像要起飞的节奏！缩量踩线、J 值低位拐头，情绪也起来了，机会不小。"
+        comment += f" 哎哟，这票今天有点猛啊！几个关键点都踩对了，缩量踩线、J 值低位拐头，情绪也起来了，浩哥看这走势像要起飞的节奏！机会不小，兄弟们别错过。"
     elif active_count >= 1:
-        comment += f" 信号有，但还不够猛。浩哥觉得得再等等放量确认，不然容易假动作。别急，子弹留着等更好的。"
+        comment += f" 信号有，但还不够猛。浩哥觉得得再等等放量确认，不然容易假动作。子弹留着等更好的，别急着梭哈。"
     else:
         comment += f" 今天这票还没到浩哥下手的点。形态一般，量没缩到位，情绪也冷冰冰的，先放放，别硬上。"
     
     if price_correction > 0:
-        comment += " 哎呀，低价但换手这么猛，主力在偷偷干活？这票有妖股潜质，浩哥有点心动！"
+        comment += " 低价但换手这么猛，主力在偷偷干活？这票有妖股潜质，浩哥有点心动！"
     elif price_correction < 0:
         comment += " 低价股还缩量阴跌，浩哥劝你别碰，容易成韭菜收割机。"
+    
+    if circ_mv < 30:
+        comment += " 市值有点小，浩哥提醒一句，小票风险高，玩的时候悠着点。"
     
     buy_advice = "浩哥建议：重仓干一票！" if total_score >= 90 else "可以买，仓位别太大。" if total_score >= 70 else "小仓试试水，注意止损。" if total_score >= 50 else "浩哥先不碰，等机会。"
     
@@ -235,9 +241,11 @@ if st.button("让浩哥分析"):
         df = calculate_indicators(df)
         last = df.iloc[-1]
         current = last['close']
-        market_cap = 100  # 模拟，实际可替换为真实接口
         
-        total_score, tech_score, ai_score, comment, buy_advice = analyze_stock(df, stock_name, current, market_cap)
+        # 真实流通市值
+        _, circ_mv = get_stock_info(symbol)
+        
+        total_score, tech_score, ai_score, comment, buy_advice = analyze_stock(df, stock_name, current, circ_mv)
         
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -250,4 +258,4 @@ if st.button("让浩哥分析"):
         st.markdown("---")
 
 st.sidebar.success("浩哥战法已就绪！")
-st.sidebar.info("浩哥亲自点评，真实数据驱动，评论生动接地气。公开分享给朋友们用吧！")
+st.sidebar.info("浩哥亲自点评，真实市值数据已接入，评论生动接地气。公开分享给朋友们用吧！")
