@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 import time
 
 # ==========================================
-# 数据获取（极速 + 价格兜底）
+# 数据获取（带缓存 + 价格兜底）
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
@@ -43,7 +43,8 @@ def fetch_history_data(symbol):
         df.set_index('date', inplace=True)
         df = df.apply(pd.to_numeric, errors='coerce')
         return calculate_indicators(df)
-    except:
+    except Exception as e:
+        st.warning(f"历史数据拉取异常: {str(e)[:100]}...")
         return None
 
 def get_stock_name(symbol):
@@ -91,59 +92,62 @@ def get_lhb_data(symbol):
         return 0.0
 
 # ==========================================
-# 技术指标计算（严格复现你的公式）
+# 技术指标计算（安全版 + 兜底填充）
 # ==========================================
 def calculate_indicators(df):
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 5:
         return df
     
     df = df.copy()
+    df['close'] = pd.to_numeric(df['close'], errors='coerce')
+    df['open']  = pd.to_numeric(df['open'], errors='coerce')
+    df['high']  = pd.to_numeric(df['high'], errors='coerce')
+    df['low']   = pd.to_numeric(df['low'], errors='coerce')
+    df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
     
-    # 趋势白线 & 大哥黄线
-    df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
-    df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() + 
-                       df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() + 
-                       df['close'].ewm(span=28, adjust=False).mean().ewm(span=28, adjust=False).mean() + 
-                       df['close'].ewm(span=56, adjust=False).mean().ewm(span=56, adjust=False).mean()) / 4
+    # MA 计算（min_periods=1 防止全NaN）
+    df['MA5']  = df['close'].rolling(5, min_periods=1).mean()
+    df['MA20'] = df['close'].rolling(20, min_periods=1).mean()
+    df['MA60'] = df['close'].rolling(60, min_periods=1).mean()
     
-    # BBI
-    ma3 = df['close'].rolling(3).mean()
-    ma6 = df['close'].rolling(6).mean()
-    ma12 = df['close'].rolling(12).mean()
-    ma24 = df['close'].rolling(24).mean()
+    ma3  = df['close'].rolling(3, min_periods=1).mean()
+    ma6  = df['close'].rolling(6, min_periods=1).mean()
+    ma12 = df['close'].rolling(12, min_periods=1).mean()
+    ma24 = df['close'].rolling(24, min_periods=1).mean()
     df['BBI'] = (ma3 + ma6 + ma12 + ma24) / 4
     
-    # VOL5
-    df['VOL5'] = df['volume'].rolling(5).mean()
+    df['VOL5'] = df['volume'].rolling(5, min_periods=1).mean()
     
     # KDJ
-    low_list = df['low'].rolling(9, min_periods=9).min()
-    high_list = df['high'].rolling(9, min_periods=9).max()
+    low_list = df['low'].rolling(9, min_periods=1).min()
+    high_list = df['high'].rolling(9, min_periods=1).max()
     rsv = (df['close'] - low_list) / (high_list - low_list).replace(0, 1) * 100
     df['K'] = rsv.ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
     
-    # RSI3日
-    lc = df['close'].shift(1)
-    temp1 = np.maximum(df['close'] - lc, 0)
-    temp2 = np.abs(df['close'] - lc)
-    df['rsi'] = temp1.rolling(3).mean() / temp2.rolling(3).mean() * 100
+    # MACD
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['dif'] = ema12 - ema26
+    df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
+    df['macd'] = (df['dif'] - df['dea']) * 2
     
     # 振幅 & 涨跌幅
     df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
     df['当日涨跌幅'] = abs(df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100
     
-    # 缩量系列
-    df['缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.416) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['回踩缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.45) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['适当缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.618) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['超缩量'] = (df['volume'] < df['volume'].rolling(30).max() / 4) | (df['volume'] < df['volume'].rolling(50).max() / 6)
+    df['缩量'] = df['volume'] < df['volume'].rolling(20, min_periods=1).max() * 0.416
+    
+    # 兜底填充均线（防止 KeyError）
+    df['MA5']  = df['MA5'].fillna(df['close'])
+    df['MA20'] = df['MA20'].fillna(df['close'])
+    df['MA60'] = df['MA60'].fillna(df['close'])
     
     return df
 
 # ==========================================
-# K线图（完整保留）
+# K线图（安全版）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -156,9 +160,13 @@ def plot_kline(df, symbol, name):
         name='K线', increasing_line_color='red', decreasing_line_color='green'
     ), row=1, col=1)
     
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
+    # 安全添加均线
+    if 'MA5' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
+    if 'MA20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
+    if 'MA60' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
     
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
