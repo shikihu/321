@@ -34,7 +34,7 @@ def calculate_indicators(df):
     return df
 
 # ======================
-# 【2】数据获取函数
+# 【2】数据获取函数（修复股票名 + 速度优化）
 # ======================
 def get_real_time_price(symbol):
     """优先腾讯实时价"""
@@ -86,19 +86,35 @@ def fetch_stock_history(symbol):
         
         if len(df) < 20:
             return None
+        
+        # ✅ 直接计算指标（避免重复调用）
+        df = calculate_indicators(df)
         return df
     except:
         return None
 
 @st.cache_data(ttl=1800)
 def get_stock_info(symbol):
+    """✅ 双保险：AkShare失败则用腾讯接口"""
     try:
         info = ak.stock_individual_info_em(symbol=symbol)
         name = info[info['项目'] == '股票简称']['值'].values[0]
         circ_mv = info[info['项目'] == '流通市值']['值'].values[0] / 100000000  # 亿元
         return name, circ_mv
     except:
-        return symbol, 100.0
+        # 备用：腾讯接口获取名称
+        try:
+            prefix = 'sh' if symbol.startswith('6') else 'sz'
+            url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
+            r = requests.get(url, timeout=3)
+            text = r.text.strip()
+            if text.startswith('var hq_str_'):
+                parts = text.split('"')[1].split(',')
+                if len(parts) >= 2:
+                    name = parts[1].strip()  # 股票名称
+                    return name, 100.0  # 默认市值100亿
+        except:
+            return symbol, 100.0  # 最终兜底
 
 @st.cache_data(ttl=1800)
 def get_stock_news(symbol):
@@ -239,7 +255,7 @@ with st.sidebar:
     """)
     st.markdown("**💡 心态**：沉没成本不决策，戒骄戒躁，珍惜子弹！")
     st.divider()
-    st.success("✅ 已修复：函数顺序 + 参数匹配 + 7列错误")
+    st.success("✅ 已修复：股票名显示 + 速度优化 + 稳定运行")
     st.info("✨ 评论100%动态生成：含具体数值+Z哥口头禅")
 
 # 用户输入
@@ -268,28 +284,25 @@ if st.button("🚀 让浩哥分析", use_container_width=True):
             continue
         
         try:
-            # 获取基础信息
+            # 获取基础信息（✅ 双保险确保名字显示）
             stock_name, circ_mv = get_stock_info(symbol)
             current = get_real_time_price(symbol)
             news = get_stock_news(symbol)
             lhb_net = get_lhb_data(symbol)
             
-            # 获取并处理K线
+            # 获取并处理K线（✅ 指标已预计算）
             df = fetch_stock_history(symbol)
             if df is None or len(df) < 20:
                 st.error(f"❌ {symbol}({stock_name})：历史数据不足（需≥20日）")
                 st.markdown("---")
                 continue
             
-            # 计算技术指标（✅ 此处调用已定义的函数）
-            df = calculate_indicators(df)
-            
-            # 生成分析
+            # 生成分析（✅ 传入完整df）
             total_score, comment, buy_advice, news_text = analyze_stock(
                 df, stock_name, current, circ_mv, news, lhb_net
             )
             
-            # 显示结果
+            # 显示结果（✅ 名称正常显示）
             st.subheader(f"📊 {symbol} - {stock_name}")
             
             col1, col2 = st.columns([1, 3])
