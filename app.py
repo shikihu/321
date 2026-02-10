@@ -133,6 +133,12 @@ def calculate_indicators(df):
     df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
     df['macd'] = (df['dif'] - df['dea']) * 2
     
+    # RSI3日
+    lc = df['close'].shift(1)
+    temp1 = np.maximum(df['close'] - lc, 0)
+    temp2 = np.abs(df['close'] - lc)
+    df['rsi'] = temp1.rolling(3).mean() / temp2.rolling(3).mean() * 100
+    
     # 振幅 & 涨跌幅
     df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
     df['当日涨跌幅'] = abs(df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100
@@ -217,7 +223,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
     signals = {}
     
     # 浩哥缩量战法（红色缩量B1）
-    if do_up_trend and safe_get('J', 0) < 14 and shrink and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 2.5:
+    if do_up_trend and safe_get('J', 0) < 14 and shrink and safe_get('当日振幅', 999) < 8 and (safe_get('当日涨跌幅', 999) < 2.5 or (last['close'] > last['open'] and safe_get('当日涨跌幅', 999) < 4)):
         signals['浩哥缩量战法'] = True
     
     # 浩哥极缩战法（青色超级缩量B1）
@@ -279,21 +285,21 @@ def analyze_stock(df, name, current, symbol, money_flow):
     
     tech_score = min(max(tech_score, 0), 70.0)
     
-    # AI 面
-    ai_score = 0.0
+    # 浩哥评分（原 AI 面）
+    hao_score = 0.0
     lhb_net = get_lhb_data(symbol)
     real_flow = money_flow if abs(money_flow) > 0 else lhb_net
     if real_flow > 0.5:
-        ai_score += min(real_flow * 5, 15.0)
+        hao_score += min(real_flow * 5, 15.0)
     elif real_flow > 0.1:
-        ai_score += 5.0
+        hao_score += 5.0
     elif real_flow < -0.5:
-        ai_score -= min(abs(real_flow) * 5, 10.0)
+        hao_score -= min(abs(real_flow) * 5, 10.0)
     
-    total_score = tech_score + ai_score
+    total_score = tech_score + hao_score
     total_score = min(max(total_score, 0), 100.0)
     
-    # 专业评论
+    # 专业评论（加入技术指标话术）
     comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
     
     if triggered_signals:
@@ -302,8 +308,21 @@ def analyze_stock(df, name, current, symbol, money_flow):
         comment += "浩哥今天未检测到关键信号，形态未到最佳点。\n\n"
     
     comment += f"【技术面评分】{tech_score:.1f}/70\n"
-    comment += f"【AI 面评分】{ai_score:.1f}/30\n"
+    comment += f"【浩哥评分】{hao_score:.1f}/30\n"
     comment += f"【浩哥综合打分】{total_score:.1f}/100\n\n"
+    
+    # 加入技术指标话术（示例，根据分数随机组合）
+    tech_talk = ""
+    if 'macd' in df.columns and df['macd'].iloc[-1] > 0:
+        tech_talk += "MACD 柱线翻红，短期动能有修复迹象；"
+    if 'rsi' in df.columns and safe_get('rsi', 50) > 60:
+        tech_talk += "RSI 进入超买区，警惕短期回调压力；"
+    if shrink:
+        tech_talk += "量能持续萎缩，属于典型缩量调整形态；"
+    if do_up_trend:
+        tech_talk += "短期均线多头排列，趋势结构仍保持完整；"
+    
+    comment += f"技术面观察：{tech_talk}\n\n"
     
     comment += f"💰 资金面：主力净流入 {real_flow:.2f} 亿。\n"
     
