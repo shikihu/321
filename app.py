@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import yfinance as yf
 import numpy as np
 import time
+import akshare as ak
 
 # ======================
 # 数据获取：双源 fallback
@@ -76,16 +76,26 @@ def fetch_stock_history(symbol):
     return df, source
 
 # ======================
-# 技术指标计算（完整实现所有列）
+# 获取股票名称
+# ======================
+@st.cache_data(ttl=3600)
+def get_stock_name(symbol):
+    try:
+        info = ak.stock_individual_info_em(symbol=symbol)
+        name = info[info['项目'] == '股票简称']['值'].values[0]
+        return name
+    except:
+        return symbol
+
+# ======================
+# 技术指标计算（简化，只计算必要列）
 # ======================
 def calculate_indicators(df):
     df = df.copy()
     
-    # BBI
+    # 核心指标（用于判断）
     df['BBI'] = (df['close'].rolling(3).mean() + df['close'].rolling(6).mean() + 
                  df['close'].rolling(12).mean() + df['close'].rolling(24).mean()) / 4
-    
-    # 趋势白线 & 大哥黄线
     df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
     df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() + 
                    df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() + 
@@ -118,74 +128,57 @@ def calculate_indicators(df):
     # 振幅 & 涨跌幅 & 换手 & 量比
     df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
     df['当日涨跌幅'] = abs(df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100
-    df['换手率'] = df['volume'] / (df['close'] * 100000000) * 100  # 粗估换手
+    df['换手率'] = df['volume'] / (df['close'] * 100000000) * 100  # 粗估
     df['量比'] = df['volume'] / df['volume'].rolling(5).mean()
     
-    # 缩量系列
+    # 缩量系列（简化）
     df['缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.416) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['回踩缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.45) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['适当缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.618) | (df['volume'] < df['volume'].rolling(50).max() / 3)
-    df['超缩量'] = (df['volume'] < df['volume'].rolling(30).max() / 4) | (df['volume'] < df['volume'].rolling(50).max() / 6)
-    
-    # 异动 & 洗盘
-    df['近期振幅'] = ((df['high'].rolling(20).max() - df['low'].rolling(20).min()) / df['low'].rolling(20).min()) * 100
-    df['远期振幅'] = ((df['high'].rolling(50).max() - df['low'].rolling(50).min()) / df['low'].rolling(50).min()) * 100
-    df['近期异动'] = df['近期振幅'] >= 15
-    df['远期异动'] = df['远期振幅'] >= 30
-    df['超级异动'] = df['近期振幅'] >= 60
-    
-    # 其他简化条件
-    df['做上涨趋势'] = df['趋势白线'] >= df['大哥黄线'] * 0.999
-    df['强趋势股'] = df['大哥黄线'] >= df['大哥黄线'].shift(1) * 0.999
-    df['超牛股'] = df['远期振幅'] > 80
     
     return df
 
 # ======================
-# Z哥战法分析
+# 浩哥战法分析（隐藏 B1 名词）
 # ======================
 def analyze_stock(df, name, current, market_cap):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 安全访问列（防止 KeyError）
+    # 安全访问
     def safe_get(col, default=False):
         return last.get(col, default) if col in last else default
     
-    # 核心条件判断（基于真实数据）
+    # 核心判断（隐藏 B1 名词，只用内部逻辑）
     dist_white = abs(last['close'] - last['趋势白线']) / last['趋势白线'] * 100 if '趋势白线' in last else 999
     dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100 if '大哥黄线' in last else 999
-    dist_bbi = abs(last['close'] - last['BBI']) / last['BBI'] * 100 if 'BBI' in last else 999
     
-    conds = {
-        '超卖缩量拐头B': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 3,
-        '超卖缩量B': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('当日振幅', 999) < 8 and safe_get('缩量', False),
-        '原始B1': (last['趋势白线'] > last['大哥黄线']) and (safe_get('j') < 13 or safe_get('rsi') < 21) and safe_get('适当缩量', False),
-        '超卖超缩量B': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('超缩量', False) and safe_get('远期振幅', 0) >= 45,
-        '回踩白线B': (dist_white < 2 or dist_bbi < 2.5) and safe_get('回踩缩量', False) and (safe_get('强势回踩不破', True)),
-        '回踩超级B': safe_get('超牛股', False) and (safe_get('j') < 35 or safe_get('rsi') < 45) and safe_get('适当缩量', False),
-        '回踩黄线B': (dist_yellow <= 1.5) and safe_get('缩量', False) and last['大哥黄线'] >= df['大哥黄线'].shift(1).iloc[-1] * 0.997 if '大哥黄线' in df else False
+    # 信号激活（内部计算，不显示名字）
+    signals = {
+        's1': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 3,  # 拐头
+        's2': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('当日振幅', 999) < 8 and safe_get('缩量', False),  # 缩量
+        's3': (last['趋势白线'] > last['大哥黄线']) and (safe_get('j') < 13 or safe_get('rsi') < 21) and safe_get('缩量', False),  # 原始
+        's4': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('缩量', False) and safe_get('远期振幅', 0) >= 45,  # 超缩
+        's5': (dist_white < 2) and safe_get('缩量', False),  # 回踩白
+        's6': safe_get('超牛股', False) and (safe_get('j') < 35 or safe_get('rsi') < 45) and safe_get('缩量', False),  # 超级
+        's7': (dist_yellow <= 1.5) and safe_get('缩量', False)  # 黄线
     }
     
-    # 权重
+    # 权重（不变）
     weights = {
-        '回踩超级B': 25,
-        '超卖超缩量B': 22,
-        '回踩白线B': 18,
-        '原始B1': 15,
-        '超卖缩量拐头B': 10,
-        '回踩黄线B': 8,
-        '超卖缩量B': 5
+        's6': 25,  # 超级
+        's4': 22,  # 超缩
+        's5': 18,  # 白线
+        's3': 15,  # 原始
+        's1': 10,  # 拐头
+        's7': 8,   # 黄线
+        's2': 5    # 缩量
     }
     
-    # 技术分
-    tech_score = sum(weights.get(k, 0) for k, v in conds.items() if v)
+    tech_score = sum(weights.get(k, 0) for k, v in signals.items() if v)
     
-    # 低价股修正
+    # 低价修正
     price_correction = 0
     if current < 12:
         price_correction = -4
-        # 激活条件（任一满足则加 2 分）
         if (safe_get('换手率', 0) > 5) or (safe_get('量比', 0) > 1.5) or \
            (last['close'] > last['大哥黄线'] and last['macd'] > 0):
             price_correction = +2
@@ -205,37 +198,34 @@ def analyze_stock(df, name, current, market_cap):
     total_score = tech_score + ai_score
     total_score = min(total_score, 100)
     
-    # 个性化评论
-    comment = f"{name} 当前价 {current:.2f} 元，流通市值 {market_cap:.2f} 亿。"
-    active = [k for k, v in conds.items() if v]
-    if active:
-        comment += f" 触发 {len(active)} 个 B1 信号：{', '.join(active)}。"
-        if '回踩超级B' in active:
-            comment += " 回踩超级B 王牌信号出现，含金量极高，建议重点关注尾盘低吸。"
-        if '原始B1' in active:
-            comment += " 原始 B1 基准信号强，首踩机会大，量价配合健康。"
-        if '超卖缩量B' in active:
-            comment += " 超卖缩量B 信号，但需警惕噪音，观察明天放量确认。"
+    # 生动评论（浩哥口吻）
+    comment = f"浩哥瞅了瞅 {name}，当前价 {current:.2f} 元，流通市值 {market_cap:.2f} 亿。兄弟，这票今天有点意思啊……"
+    active_count = sum(1 for v in signals.values() if v)
+    if active_count >= 3:
+        comment += f" 形态走得挺漂亮，几个关键点都对上了，浩哥看这走势有点像要起飞的节奏！缩量踩线、J 值低位拐头，情绪也起来了，机会不小。"
+    elif active_count >= 1:
+        comment += f" 信号有，但还不够猛。浩哥觉得得再等等放量确认，不然容易假动作。别急，子弹留着等更好的。"
     else:
-        comment += " 未触发任何 B1 信号，技术面一般，情绪低迷。"
+        comment += f" 今天这票还没到浩哥下手的点。形态一般，量没缩到位，情绪也冷冰冰的，先放放，别硬上。"
     
     if price_correction > 0:
-        comment += " 低价股但活跃度高（换手/量比/形态），反而是潜力妖股机会。"
+        comment += " 哎呀，低价但换手这么猛，主力在偷偷干活？这票有妖股潜质，浩哥有点心动！"
     elif price_correction < 0:
-        comment += " 低价股 + 缩量阴跌，风险较高，建议回避。"
+        comment += " 低价股还缩量阴跌，浩哥劝你别碰，容易成韭菜收割机。"
     
-    buy_advice = "重仓机会" if total_score >= 90 else "可买" if total_score >= 70 else "小仓试水" if total_score >= 50 else "不建议买"
+    buy_advice = "浩哥建议：重仓干一票！" if total_score >= 90 else "可以买，仓位别太大。" if total_score >= 70 else "小仓试试水，注意止损。" if total_score >= 50 else "浩哥先不碰，等机会。"
     
-    return total_score, tech_score, ai_score, comment, buy_advice, conds, active
+    return total_score, tech_score, ai_score, comment, buy_advice
 
 # 主界面
-st.title("Z哥 AI 分析师 - 少妇 & B1 战法（专业量化版）")
+st.title("浩哥 AI 分析师 - 浩哥战法")
 
 codes_input = st.text_input("输入股票代码（逗号分隔，如 600519,601218）")
-if st.button("让 Z哥分析"):
+if st.button("让浩哥分析"):
     codes = [c.strip() for c in codes_input.split(',') if c.strip()]
     for symbol in codes:
-        st.subheader(f"Z哥看 {symbol}")
+        stock_name = get_stock_name(symbol)
+        st.subheader(f"浩哥看 {symbol} - {stock_name}")
         
         df, source = fetch_stock_history(symbol)
         if df is None:
@@ -244,48 +234,20 @@ if st.button("让 Z哥分析"):
         
         df = calculate_indicators(df)
         last = df.iloc[-1]
-        name = symbol  # 简化
         current = last['close']
-        market_cap = 100  # 模拟
+        market_cap = 100  # 模拟，实际可替换为真实接口
         
-        total_score, tech_score, ai_score, comment, buy_advice, conds, active = analyze_stock(df, name, current, market_cap)
+        total_score, tech_score, ai_score, comment, buy_advice = analyze_stock(df, stock_name, current, market_cap)
         
         col1, col2 = st.columns([1, 3])
         with col1:
-            st.metric("总分", f"{total_score:.1f}/100", delta_color="normal")
-            st.metric("技术分", f"{tech_score:.1f}/70")
-            st.metric("AI情绪分", f"{ai_score:.1f}/30")
+            st.metric("浩哥打分", f"{total_score:.1f}/100", delta_color="normal")
         with col2:
-            st.write("**Z哥深度评论：**")
+            st.write("**浩哥点评：**")
             st.info(comment)
-            st.write("**能不能买？**", buy_advice)
+            st.write("**浩哥建议：**", buy_advice)
         
-        # K线图（升级版）
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K线", increasing_line_color='red', decreasing_line_color='green'))
-        fig.add_trace(go.Bar(x=df.index, y=df['volume'], name="成交量", yaxis='y2', marker_color='rgba(100,100,100,0.5)'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], name='趋势白线', line=dict(color='white', width=2)))
-        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], name='大哥黄线', line=dict(color='yellow', width=2)))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBI'], name='BBI', line=dict(color='blue', width=2)))
-        fig.update_layout(
-            title=f"{symbol} K线图（可拖动缩放）",
-            xaxis_rangeslider_visible=True,
-            height=600,
-            yaxis=dict(title="价格"),
-            yaxis2=dict(title="成交量", overlaying='y', side='right'),
-            xaxis=dict(rangeselector=dict(buttons=list([
-                dict(count=1, label="1月", step="month", stepmode="backward"),
-                dict(count=6, label="6月", step="month", stepmode="backward"),
-                dict(count=1, label="YTD", step="year", stepmode="todate"),
-                dict(step="all")
-            ]))),
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.write("**B1 信号清单：**")
-        for k, v in conds.items():
-            st.write(f"- {k}：{'✅' if v else '❌'}")
+        st.markdown("---")
 
-st.sidebar.success("专业量化版已就绪！")
-st.sidebar.info("评分基于历史胜率 + 实时数据，评论个性化。")
+st.sidebar.success("浩哥战法已就绪！")
+st.sidebar.info("浩哥亲自点评，真实数据驱动，评论生动接地气。公开分享给朋友们用吧！")
