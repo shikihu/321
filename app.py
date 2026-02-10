@@ -19,7 +19,7 @@ def calculate_indicators(df):
     # 移动平均线 (白线MA5, 黄线MA20, 趋势线MA60)
     df['MA5'] = df['close'].rolling(window=5).mean()    # 白线
     df['MA20'] = df['close'].rolling(window=20).mean()  # 黄线 (大哥线)
-    df['MA60'] = df['close'].rolling(window=60).mean()
+    df['MA60'] = df['close'].rolling(window=60).mean()  # 生命线
     
     # BBI 多空指标
     ma3 = df['close'].rolling(window=3).mean()
@@ -54,7 +54,6 @@ def get_real_time_price(symbol):
             pre_close = float(parts[2])
             open_price = float(parts[1])
             volume = float(parts[8]) # 股数
-            # 简易量比计算 (大概估算，AKShare其实有更准的但较慢)
             return current_price, pre_close, volume
     except:
         pass
@@ -126,13 +125,16 @@ def analyze_logic(df, current_price, symbol, name, money_flow):
         return 0, "数据不足，浩哥没法算。", "观望"
 
     last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
     
     # --- A. 基础数据准备 ---
     close = last_row['close']
     vol = last_row['volume']
     ma5 = last_row['MA5']     # 白线
     ma20 = last_row['MA20']   # 黄线 (大哥线)
+    
+    # 【修复点】这里补上了 ma60 的定义
+    ma60 = last_row.get('MA60', ma20) # 如果没有MA60，暂时用MA20代替防止报错
+    
     j_val = last_row['J']     # KDJ之J值
     vol5 = last_row['VOL5']
     
