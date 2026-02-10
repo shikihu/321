@@ -148,22 +148,26 @@ def analyze_stock(df, name, current, market_cap):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 核心条件判断（现在基于真实数据计算）
-    dist_white = abs(last['close'] - last['趋势白线']) / last['趋势白线'] * 100
-    dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100
-    dist_bbi = abs(last['close'] - last['BBI']) / last['BBI'] * 100
+    # 安全访问列（防止 KeyError）
+    def safe_get(col, default=False):
+        return last.get(col, default) if col in last else default
+    
+    # 核心条件判断（基于真实数据）
+    dist_white = abs(last['close'] - last['趋势白线']) / last['趋势白线'] * 100 if '趋势白线' in last else 999
+    dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100 if '大哥黄线' in last else 999
+    dist_bbi = abs(last['close'] - last['BBI']) / last['BBI'] * 100 if 'BBI' in last else 999
     
     conds = {
-        '超卖缩量拐头B': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and last['当日振幅'] < 8 and last['当日涨跌幅'] < 3,
-        '超卖缩量B': (last['j'] < 14 or last['rsi'] < 23) and last['当日振幅'] < 8 and last['缩量'].iloc[-1],
-        '原始B1': (last['趋势白线'] > last['大哥黄线']) and (last['j'] < 13 or last['rsi'] < 21) and last['适当缩量'].iloc[-1],
-        '超卖超缩量B': (last['j'] < 14 or last['rsi'] < 23) and last['超缩量'].iloc[-1] and last['远期振幅'] >= 45,
-        '回踩白线B': (dist_white < 2 or dist_bbi < 2.5) and last['回踩缩量'].iloc[-1] and (last['强势回踩不破'] or True),
-        '回踩超级B': last['超牛股'].iloc[-1] and (last['j'] < 35 or last['rsi'] < 45) and last['适当缩量'].iloc[-1],
-        '回踩黄线B': (dist_yellow <= 1.5) and last['缩量'].iloc[-1] and last['大哥黄线'] >= df['大哥黄线'].shift(1).iloc[-1] * 0.997
+        '超卖缩量拐头B': (last['rsi'] - 15 >= df['rsi'].shift(1).iloc[-1]) and (df['rsi'].shift(1).iloc[-1] < 20 or df['j'].shift(1).iloc[-1] < 14) and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 3,
+        '超卖缩量B': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('当日振幅', 999) < 8 and safe_get('缩量', False),
+        '原始B1': (last['趋势白线'] > last['大哥黄线']) and (safe_get('j') < 13 or safe_get('rsi') < 21) and safe_get('适当缩量', False),
+        '超卖超缩量B': (safe_get('j') < 14 or safe_get('rsi') < 23) and safe_get('超缩量', False) and safe_get('远期振幅', 0) >= 45,
+        '回踩白线B': (dist_white < 2 or dist_bbi < 2.5) and safe_get('回踩缩量', False) and (safe_get('强势回踩不破', True)),
+        '回踩超级B': safe_get('超牛股', False) and (safe_get('j') < 35 or safe_get('rsi') < 45) and safe_get('适当缩量', False),
+        '回踩黄线B': (dist_yellow <= 1.5) and safe_get('缩量', False) and last['大哥黄线'] >= df['大哥黄线'].shift(1).iloc[-1] * 0.997 if '大哥黄线' in df else False
     }
     
-    # 权重（按你认可的方案）
+    # 权重
     weights = {
         '回踩超级B': 25,
         '超卖超缩量B': 22,
@@ -182,7 +186,7 @@ def analyze_stock(df, name, current, market_cap):
     if current < 12:
         price_correction = -4
         # 激活条件（任一满足则加 2 分）
-        if (last['换手率'] > 5) or (last['量比'] > 1.5) or \
+        if (safe_get('换手率', 0) > 5) or (safe_get('量比', 0) > 1.5) or \
            (last['close'] > last['大哥黄线'] and last['macd'] > 0):
             price_correction = +2
     
