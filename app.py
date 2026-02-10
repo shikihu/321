@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import numpy as np
+import time
 import akshare as ak
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -67,6 +68,17 @@ def get_money_flow(symbol):
     except:
         return 0.0
 
+def get_lhb_data(symbol):
+    try:
+        lhb = ak.stock_lhb_detail_em(symbol=symbol)
+        if not lhb.empty:
+            latest = lhb.iloc[0]
+            net_amount = latest.get('净买入额(万元)', 0) / 10000  # 亿元
+            return net_amount
+        return 0.0
+    except:
+        return 0.0
+
 # ==========================================
 # 技术指标计算
 # ==========================================
@@ -109,7 +121,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# K线图（Gemini版完整保留）
+# K线图
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
