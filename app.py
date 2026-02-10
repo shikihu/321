@@ -109,7 +109,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# K线图
+# K线图（Gemini版完整保留）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -144,7 +144,7 @@ def plot_kline(df, symbol, name):
 # ==========================================
 # 浩哥战法评分（7种浩哥战法 + 回测权重 + 专业评论）
 # ==========================================
-def analyze_stock(df, name, current):
+def analyze_stock(df, name, current, symbol):
     if df is None or len(df) < 2:
         return 0.0, f"浩哥看 {name} 数据不足，无法分析。", "浩哥建议：暂缓操作。"
     
@@ -165,7 +165,7 @@ def analyze_stock(df, name, current):
         '浩哥黄线战法': abs(last['close'] - safe_get('MA20', last['close'])) / last['close'] * 100 <= 1.5
     }
     
-    # 回测权重
+    # 回测权重（胜率越高权重越高）
     weights = {
         '浩哥超级战法': 25.0,
         '浩哥极缩战法': 22.0,
@@ -176,7 +176,7 @@ def analyze_stock(df, name, current):
         '浩哥缩量战法': 5.0
     }
     
-    # 技术分
+    # 技术分计算
     tech_score = 0.0
     triggered_signals = []
     for sig, active in signals.items():
@@ -184,7 +184,7 @@ def analyze_stock(df, name, current):
             tech_score += weights[sig]
             triggered_signals.append(sig)
     
-    # 低价股复活
+    # 低价股复活机制
     price_correction = 0.0
     if current < 12:
         price_correction = -5.0
@@ -196,7 +196,7 @@ def analyze_stock(df, name, current):
     
     tech_score = min(max(tech_score, 0), 70.0)
     
-    # AI 面
+    # AI 面（0-30）
     ai_score = 0.0
     lhb_net = get_lhb_data(symbol)
     if lhb_net > 0.5:
@@ -217,7 +217,7 @@ def analyze_stock(df, name, current):
     comment += f"【AI 面评分】{ai_score:.1f}/30\n"
     comment += f"【浩哥综合打分】{total_score:.1f}/100\n\n"
     
-    # 浩哥点评
+    # 浩哥点评（专业版）
     if total_score >= 85:
         comment += "浩哥认为当前形态与资金情绪高度共振，机会显著大于风险，属于较优的低吸/加仓窗口。"
         advice = "建议积极布局，仓位可适当加重，关注放量突破确认。"
@@ -232,39 +232,6 @@ def analyze_stock(df, name, current):
         advice = "浩哥建议暂时回避，保护本金，等待更清晰的信号。"
     
     return total_score, comment, advice
-
-# ==========================================
-# K线图
-# ==========================================
-def plot_kline(df, symbol, name):
-    df = df.iloc[-120:]
-   
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
-   
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
-        name='K线', increasing_line_color='red', decreasing_line_color='green'
-    ), row=1, col=1)
-   
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
-   
-    colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-   
-    fig.update_layout(
-        title=f"{name} ({symbol}) - 浩哥专用图表",
-        yaxis_title='价格',
-        xaxis_rangeslider_visible=True,
-        height=500,
-        margin=dict(l=20, r=20, t=40, b=20),
-        plot_bgcolor='#1e1e1e',
-        paper_bgcolor='#0e1117',
-        font=dict(color='white')
-    )
-    return fig
 
 # ==========================================
 # 主界面
@@ -296,7 +263,7 @@ if st.button("开始挖掘"):
             money_flow = get_money_flow(symbol)
            
             if df is not None:
-                score, comment, advice = analyze_stock(df, name, current_price)
+                score, comment, advice = analyze_stock(df, name, current_price, symbol)
                
                 c1, c2 = st.columns([1, 3])
                 with c1:
