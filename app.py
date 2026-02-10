@@ -87,57 +87,76 @@ def get_lhb_data(symbol):
         return 0.0
 
 # ======================
-# 浩哥战法分析
+# 浩哥分析核心逻辑
 # ======================
-def analyze_stock(current, name, circ_mv, news, lhb_net):
-    # 技术分基础（模拟你的权重 + 精细小数）
+def analyze_stock(df, name, current, circ_mv, news, lhb_net):
+    if df is None or len(df) < 2:
+        return 0.0, f"浩哥看 {name} 数据不足，先等等吧。", "浩哥建议：数据不全，换个票再来。", "暂无新闻。"
+    
+    last = df.iloc[-1]
+    
+    # 安全访问列
+    def safe_get(col, default=0.0):
+        return last.get(col, default) if col in last else default
+    
+    # 信号权重（你的认可方案）
+    weights = {
+        '回踩超级B': 25.0,
+        '超卖超缩量B': 22.0,
+        '回踩白线B': 18.0,
+        '原始B1': 15.0,
+        '超卖缩量拐头B': 10.0,
+        '回踩黄线B': 8.0,
+        '超卖缩量B': 5.0
+    }
+    
+    # 模拟信号激活（实际可替换为完整条件判断）
     tech_score = 0.0
+    tech_score += weights['回踩超级B'] if np.random.rand() > 0.3 else 0.0
+    tech_score += weights['超卖超缩量B'] if np.random.rand() > 0.4 else 0.0
+    tech_score += weights['回踩白线B'] if np.random.rand() > 0.5 else 0.0
+    tech_score += weights['原始B1'] if np.random.rand() > 0.6 else 0.0
+    tech_score += weights['超卖缩量拐头B'] if np.random.rand() > 0.7 else 0.0
+    tech_score += weights['回踩黄线B'] if np.random.rand() > 0.8 else 0.0
+    tech_score += weights['超卖缩量B'] if np.random.rand() > 0.9 else 0.0
     
-    # 信号权重（真实激活需完整数据，这里模拟差异）
-    tech_score += 25.0 if np.random.rand() > 0.3 else 0  # 回踩超级B
-    tech_score += 22.0 if np.random.rand() > 0.4 else 0  # 超卖超缩量B
-    tech_score += 18.0 if np.random.rand() > 0.5 else 0  # 回踩白线B
-    tech_score += 15.0 if np.random.rand() > 0.6 else 0  # 原始B1
-    tech_score += 10.0 if np.random.rand() > 0.7 else 0  # 拐头
-    tech_score += 8.0 if np.random.rand() > 0.8 else 0   # 黄线
-    tech_score += 5.0 if np.random.rand() > 0.9 else 0   # 缩量
-    
-    # J 值精细加分
-    j_score = np.clip(( -last.get('j', 0) / 10 ) * 0.3, -3, 3)  # J 越负加分越多
-    tech_score += j_score
+    # J 值精细加分（J 越负加分越多）
+    j_val = safe_get('j', 0)
+    if j_val < 0:
+        j_bonus = np.clip((-j_val / 10) * 0.3, 0, 3.0)  # 上限 3 分
+        tech_score += j_bonus
     
     # 低价股复活机制
     price_correction = 0.0
     if current < 12:
         price_correction = -5.0
-        if (last.get('换手率', 0) > 5) or (last.get('量比', 0) > 1.5) or \
-           (last['close'] > last.get('大哥黄线', 0) and last.get('macd', 0) > 0):
+        if (safe_get('换手率', 0) > 5) or (safe_get('量比', 0) > 1.5) or \
+           (last['close'] > safe_get('大哥黄线', last['close']) and safe_get('macd', 0) > 0):
             price_correction = +3.0  # 复活 +3
     tech_score += price_correction
     
     tech_score = min(max(tech_score, 0), 70.0)
     
-    # AI 分（实时热点 + 资金 + 新闻情绪）
+    # AI 分（0-30 分）
     ai_score = 0.0
-    # 市值加分
     if circ_mv > 50:
         ai_score += 8.0
     elif circ_mv < 30:
         ai_score -= 5.0
     
-    # 资金流（龙虎榜净买入）
+    # 资金流加分
     if lhb_net > 0.5:
-        ai_score += min(lhb_net * 5, 15.0)  # 大额流入加分
+        ai_score += min(lhb_net * 5, 15.0)
     elif lhb_net < -0.5:
         ai_score -= min(abs(lhb_net) * 5, 10.0)
     
-    # 新闻情绪（简单模拟）
-    ai_score += 5.0 if len(news) > 2 else 0  # 有新闻加分
+    # 新闻情绪
+    ai_score += 5.0 if len(news) > 2 else 0.0
     
     total_score = tech_score + ai_score
     total_score = min(max(total_score, 0), 100.0)
     
-    # 生动评论（浩哥口吻）
+    # 浩哥生动评论
     comment = f"浩哥瞅了瞅 {name}，当前价 {current:.2f} 元，流通市值 {circ_mv:.2f} 亿。"
     
     if total_score >= 90:
