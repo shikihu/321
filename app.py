@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 import time
 
 # ==========================================
-# 数据获取（极速版 + 缓存）
+# 数据获取（极速 + 价格兜底）
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
@@ -19,14 +19,15 @@ def get_real_time_price(symbol, df=None):
         text = r.text.strip()
         if text.startswith('var hq_str_'):
             parts = text.split('"')[1].split(',')
-            if len(parts) >= 4 and float(parts[3]) > 0:
-                return float(parts[3])
+            price = float(parts[3])
+            if price > 0:
+                return price, "实时价"
     except:
         pass
     # 兜底用历史收盘价
     if df is not None and len(df) > 0:
-        return df['close'].iloc[-1]
-    return 0.0
+        return df['close'].iloc[-1], "(非交易时间/最近收盘价)"
+    return 0.0, "暂无数据"
 
 @st.cache_data(ttl=600)
 def fetch_history_data(symbol):
@@ -139,16 +140,45 @@ def calculate_indicators(df):
     df['适当缩量'] = (df['volume'] < df['volume'].rolling(20).max() * 0.618) | (df['volume'] < df['volume'].rolling(50).max() / 3)
     df['超缩量'] = (df['volume'] < df['volume'].rolling(30).max() / 4) | (df['volume'] < df['volume'].rolling(50).max() / 6)
     
-    # 振幅区间 & 放宽系数（简化版，你可动态调整）
-    df['振幅区间'] = 8  # 主板8，创业/科创可放宽
-    df['放宽系数'] = 1.0
-    
     # 大绿棒判断
     vday = df['volume'].rolling(40).apply(lambda x: x.argmax(), raw=True).astype(int)
     df['大绿棒'] = (df['close'].shift(vday) < df['close'].shift(vday + 1)) & (df['close'].shift(vday) < df['open'].shift(vday))
     df['大绿棒离得远'] = vday >= 15 & df['大绿棒']
     
     return df
+
+# ==========================================
+# K线图（完整保留）
+# ==========================================
+def plot_kline(df, symbol, name):
+    df = df.iloc[-120:]
+    
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+        name='K线', increasing_line_color='red', decreasing_line_color='green'
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
+    
+    colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
+    
+    fig.update_layout(
+        title=f"{name} ({symbol}) - 浩哥专用图表",
+        yaxis_title='价格',
+        xaxis_rangeslider_visible=True,
+        height=500,
+        margin=dict(l=20, r=20, t=40, b=20),
+        plot_bgcolor='#1e1e1e',
+        paper_bgcolor='#0e1117',
+        font=dict(color='white')
+    )
+    return fig
 
 # ==========================================
 # 浩哥战法评分（严格匹配你的副图公式）
@@ -159,6 +189,7 @@ def analyze_stock(df, name, current, symbol):
     
     last = df.iloc[-1]
     
+    # 安全访问
     def safe_get(col, default=0.0):
         return last.get(col, default) if col in last else default
     
@@ -183,11 +214,11 @@ def analyze_stock(df, name, current, symbol):
     dist_yellow = abs(last['close'] - brother_yellow) / brother_yellow * 100
     back_yellow = (last['close'] >= brother_yellow and dist_yellow <= 1.5) or (last['close'] < brother_yellow and dist_yellow <= 0.8)
     
-    # 7种浩哥战法（严格匹配你的公式）
+    # 7种浩哥战法（严格对齐你的公式）
     signals = {}
     
     # 浩哥缩量战法（红色缩量B1）
-    if do_up_trend and safe_get('J', 0) < 14 and shrink and safe_get('当日振幅', 999) < 8:
+    if do_up_trend and safe_get('J', 0) < 14 and shrink and safe_get('当日振幅', 999) < 8 and safe_get('当日涨跌幅', 999) < 2.5:
         signals['浩哥缩量战法'] = True
     
     # 浩哥极缩战法（青色超级缩量B1）
