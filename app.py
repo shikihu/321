@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import requests
 import numpy as np
-import time
 import akshare as ak
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import time
 
 # ==========================================
-# 数据获取
+# 1. 数据获取（极速版）
 # ==========================================
 def get_real_time_price(symbol):
     prefix = 'sh' if symbol.startswith('6') else 'sz'
@@ -26,14 +26,14 @@ def fetch_history_data(symbol):
     prefix = 'sh' if symbol.startswith('6') else 'sz'
     url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
     try:
-        r = requests.get(url, timeout=5).json()
+        r = requests.get(url, timeout=6).json()
         data = r.get('data', {}).get(f"{prefix}{symbol}", {}).get('qfqday', [])
         if not data:
             return None
         df = pd.DataFrame([row[:6] for row in data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
-        df = df.apply(pd.to_numeric)
+        df = df.apply(pd.to_numeric, errors='coerce')
         return calculate_indicators(df)
     except:
         return None
@@ -55,7 +55,7 @@ def get_stock_name(symbol):
 def get_stock_news(symbol):
     try:
         news = ak.stock_news_em(symbol=symbol)
-        return news.head(3)[['标题', '发布时间', '来源']].to_dict('records')
+        return news.head(3)[['标题', '发布时间']].to_dict('records')
     except:
         return []
 
@@ -63,84 +63,73 @@ def get_money_flow(symbol):
     try:
         flow = ak.stock_individual_fund_flow(stock=symbol, market="sh" if symbol.startswith('6') else "sz")
         if not flow.empty:
-            return flow.iloc[0]['主力净流入-净额'] / 100000000
-        return 0.0
-    except:
-        return 0.0
-
-def get_lhb_data(symbol):
-    try:
-        lhb = ak.stock_lhb_detail_em(symbol=symbol)
-        if not lhb.empty:
-            latest = lhb.iloc[0]
-            net_amount = latest.get('净买入额(万元)', 0) / 10000  # 亿元
-            return net_amount
+            return flow.iloc[0]['主力净流入-净额'] / 100000000  # 亿元
         return 0.0
     except:
         return 0.0
 
 # ==========================================
-# 技术指标计算
+# 2. 技术指标计算
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20:
         return df
-   
+    
     df = df.copy()
-   
+    
     df['MA5'] = df['close'].rolling(5).mean()
     df['MA20'] = df['close'].rolling(20).mean()
     df['MA60'] = df['close'].rolling(60).mean()
-   
+    
     ma3 = df['close'].rolling(3).mean()
     ma6 = df['close'].rolling(6).mean()
     ma12 = df['close'].rolling(12).mean()
     ma24 = df['close'].rolling(24).mean()
     df['BBI'] = (ma3 + ma6 + ma12 + ma24) / 4
-   
+    
     df['VOL5'] = df['volume'].rolling(5).mean()
-   
+    
     low_list = df['low'].rolling(9, min_periods=9).min()
     high_list = df['high'].rolling(9, min_periods=9).max()
     rsv = (df['close'] - low_list) / (high_list - low_list).replace(0, 1) * 100
     df['K'] = rsv.ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
-   
+    
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     df['dif'] = ema12 - ema26
     df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
     df['macd'] = (df['dif'] - df['dea']) * 2
-   
+    
     df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
     df['当日涨跌幅'] = abs(df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100
-   
+    
     df['缩量'] = df['volume'] < df['volume'].rolling(20).max() * 0.416
-   
+    
     return df
 
 # ==========================================
-# K线图
+# 3. K线图（Gemini版）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
-   
+    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         vertical_spacing=0.05, row_heights=[0.7, 0.3])
-   
+    
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
         name='K线', increasing_line_color='red', decreasing_line_color='green'
     ), row=1, col=1)
-   
+    
     fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
-   
+    
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-   
+    
     fig.update_layout(
         title=f"{name} ({symbol}) - 浩哥专用图表",
         yaxis_title='价格',
@@ -154,9 +143,9 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 浩哥战法评分（7种浩哥战法 + 回测权重 + 专业评论）
+# 4. 浩哥战法评分（7种浩哥战法 + 回测权重 + 专业评论）
 # ==========================================
-def analyze_stock(df, name, current, symbol):
+def analyze_stock(df, name, current):
     if df is None or len(df) < 2:
         return 0.0, f"浩哥看 {name} 数据不足，无法分析。", "浩哥建议：暂缓操作。"
     
@@ -177,7 +166,7 @@ def analyze_stock(df, name, current, symbol):
         '浩哥黄线战法': abs(last['close'] - safe_get('MA20', last['close'])) / last['close'] * 100 <= 1.5
     }
     
-    # 回测权重（胜率越高权重越高）
+    # 回测权重
     weights = {
         '浩哥超级战法': 25.0,
         '浩哥极缩战法': 22.0,
@@ -188,7 +177,7 @@ def analyze_stock(df, name, current, symbol):
         '浩哥缩量战法': 5.0
     }
     
-    # 技术分计算
+    # 技术分
     tech_score = 0.0
     triggered_signals = []
     for sig, active in signals.items():
@@ -196,7 +185,7 @@ def analyze_stock(df, name, current, symbol):
             tech_score += weights[sig]
             triggered_signals.append(sig)
     
-    # 低价股复活机制
+    # 低价股复活
     price_correction = 0.0
     if current < 12:
         price_correction = -5.0
@@ -208,7 +197,7 @@ def analyze_stock(df, name, current, symbol):
     
     tech_score = min(max(tech_score, 0), 70.0)
     
-    # AI 面（0-30）
+    # AI 面
     ai_score = 0.0
     lhb_net = get_lhb_data(symbol)
     if lhb_net > 0.5:
@@ -229,7 +218,7 @@ def analyze_stock(df, name, current, symbol):
     comment += f"【AI 面评分】{ai_score:.1f}/30\n"
     comment += f"【浩哥综合打分】{total_score:.1f}/100\n\n"
     
-    # 浩哥点评（专业版）
+    # 浩哥点评
     if total_score >= 85:
         comment += "浩哥认为当前形态与资金情绪高度共振，机会显著大于风险，属于较优的低吸/加仓窗口。"
         advice = "建议积极布局，仓位可适当加重，关注放量突破确认。"
