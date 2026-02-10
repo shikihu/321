@@ -5,10 +5,90 @@ import numpy as np
 import akshare as ak
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import time
 
-# 数据获取函数（保持不变，省略）
+# ==========================================
+# 1. 数据获取（极速版 + 缓存）
+# ==========================================
+@st.cache_data(ttl=300)  # 5分钟缓存，极大提升速度
+def get_real_time_price(symbol):
+    prefix = 'sh' if symbol.startswith('6') else 'sz'
+    url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
+    try:
+        r = requests.get(url, timeout=3)
+        text = r.text.strip()
+        if text.startswith('var hq_str_'):
+            parts = text.split('"')[1].split(',')
+            if len(parts) >= 4 and float(parts[3]) > 0:
+                return float(parts[3])
+    except:
+        pass
+    return 0.0
 
-# 技术指标计算（已加入你的核心公式元素）
+@st.cache_data(ttl=600)  # 10分钟缓存历史数据
+def fetch_history_data(symbol):
+    prefix = 'sh' if symbol.startswith('6') else 'sz'
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
+    try:
+        r = requests.get(url, timeout=6).json()
+        data = r.get('data', {}).get(f"{prefix}{symbol}", {}).get('qfqday', [])
+        if not data:
+            return None
+        df = pd.DataFrame([row[:6] for row in data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df = df.apply(pd.to_numeric, errors='coerce')
+        return calculate_indicators(df)
+    except:
+        return None
+
+def get_stock_name(symbol):
+    prefix = 'sh' if symbol.startswith('6') else 'sz'
+    url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
+    try:
+        r = requests.get(url, timeout=3)
+        text = r.text.strip()
+        if text.startswith('var hq_str_'):
+            parts = text.split('"')[1].split(',')
+            if len(parts) >= 2:
+                return parts[0].strip()
+    except:
+        pass
+    return symbol
+
+@st.cache_data(ttl=1800)
+def get_stock_news(symbol):
+    try:
+        news = ak.stock_news_em(symbol=symbol)
+        return news.head(3)[['标题', '发布时间', '来源']].to_dict('records')
+    except:
+        return []
+
+@st.cache_data(ttl=1800)
+def get_money_flow(symbol):
+    try:
+        flow = ak.stock_individual_fund_flow(stock=symbol, market="sh" if symbol.startswith('6') else "sz")
+        if not flow.empty:
+            return flow.iloc[0]['主力净流入-净额'] / 100000000
+        return 0.0
+    except:
+        return 0.0
+
+@st.cache_data(ttl=1800)
+def get_lhb_data(symbol):
+    try:
+        lhb = ak.stock_lhb_detail_em(symbol=symbol)
+        if not lhb.empty:
+            latest = lhb.iloc[0]
+            net_amount = latest.get('净买入额(万元)', 0) / 10000
+            return net_amount
+        return 0.0
+    except:
+        return 0.0
+
+# ==========================================
+# 2. 技术指标计算
+# ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20:
         return df
@@ -48,24 +128,55 @@ def calculate_indicators(df):
     df['适当缩量'] = df['volume'] < df['volume'].rolling(20).max() * 0.618
     df['超缩量'] = df['volume'] < df['volume'].rolling(30).max() / 4
     
-    df['距离白线'] = abs(df['close'] - df['MA5']) / df['close'] * 100
-    df['距离黄线'] = abs(df['close'] - df['MA20']) / df['close'] * 100
-    
     return df
 
-# K线图（保持不变，省略）
+# ==========================================
+# 3. K线图（Gemini版完整保留）
+# ==========================================
+def plot_kline(df, symbol, name):
+    df = df.iloc[-120:]
+    
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+        name='K线', increasing_line_color='red', decreasing_line_color='green'
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线(MA5)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='黄线(大哥线)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='生命线(MA60)'), row=1, col=1)
+    
+    colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
+    
+    fig.update_layout(
+        title=f"{name} ({symbol}) - 浩哥专用图表",
+        yaxis_title='价格',
+        xaxis_rangeslider_visible=True,
+        height=500,
+        margin=dict(l=20, r=20, t=40, b=20),
+        plot_bgcolor='#1e1e1e',
+        paper_bgcolor='#0e1117',
+        font=dict(color='white')
+    )
+    return fig
 
-# 浩哥战法评分（严格匹配你的副图公式）
+# ==========================================
+# 4. 浩哥战法评分（严格匹配你的副图公式 + 回测权重）
+# ==========================================
 def analyze_stock(df, name, current, symbol):
     if df is None or len(df) < 20:
         return 0.0, f"浩哥看 {name} 数据不足，无法分析。", "浩哥建议：暂缓操作。"
     
     last = df.iloc[-1]
     
+    # 安全访问
     def safe_get(col, default=0.0):
         return last.get(col, default) if col in last else default
     
-    # 严格匹配你的副图公式信号
+    # 7种浩哥战法（严格匹配你的公式）
     signals = {}
     
     # 浩哥缩量战法（红色缩量B1）
@@ -109,6 +220,7 @@ def analyze_stock(df, name, current, symbol):
         '浩哥缩量战法': 5.0
     }
     
+    # 技术分
     tech_score = 0.0
     triggered_signals = []
     for sig, active in signals.items():
@@ -149,6 +261,7 @@ def analyze_stock(df, name, current, symbol):
     comment += f"【AI 面评分】{ai_score:.1f}/30\n"
     comment += f"【浩哥综合打分】{total_score:.1f}/100\n\n"
     
+    # 浩哥点评
     if total_score >= 85:
         comment += "浩哥认为当前形态与资金情绪高度共振，机会显著大于风险，属于较优的低吸/加仓窗口。"
         advice = "建议积极布局，仓位可适当加重，关注放量突破确认。"
@@ -164,4 +277,49 @@ def analyze_stock(df, name, current, symbol):
     
     return total_score, comment, advice
 
-# 主界面（保持不变，省略）
+# ==========================================
+# 主界面
+# ==========================================
+st.set_page_config(page_title="浩哥战法", layout="wide")
+st.title("🚀 浩哥战法量化终端")
+
+with st.sidebar:
+    st.header("浩哥战法六步")
+    st.markdown(""" 
+1. 择时：看大盘温度  
+2. 选股：强势+题材热  
+3. 买点：首踩或主升  
+4. 持仓：等利润垫  
+5. 卖点：破位/高潮/情绪退潮  
+6. 复盘：每笔必复盘  
+""")
+    st.markdown("**心态**：沉没成本不决策，珍惜子弹！")
+
+codes_input = st.text_input("输入股票代码（逗号分隔）", "600519,000001")
+if st.button("开始挖掘"):
+    codes = [c.strip() for c in codes_input.split(',') if c.strip()]
+    for symbol in codes:
+        with st.spinner(f"浩哥正在分析 {symbol}..."):
+            df = fetch_history_data(symbol)
+            name = get_stock_name(symbol)
+            current_price = get_real_time_price(symbol)
+            news = get_stock_news(symbol)
+            money_flow = get_money_flow(symbol)
+           
+            if df is not None:
+                score, comment, advice = analyze_stock(df, name, current_price, symbol)
+               
+                c1, c2 = st.columns([1, 3])
+                with c1:
+                    st.metric("浩哥打分", f"{score:.1f}/100")
+                with c2:
+                    st.info(comment)
+                    st.success(f"**浩哥建议：** {advice}")
+               
+                with st.expander("查看 K线图"):
+                    fig = plot_kline(df, symbol, name)
+                    st.plotly_chart(fig, use_container_width=True)
+               
+                st.markdown("---")
+            else:
+                st.error(f"{symbol} 数据拉取失败")
