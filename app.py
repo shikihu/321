@@ -68,7 +68,7 @@ def get_money_flow(symbol):
         return 0.0
 
 # ==========================================
-# 技术指标计算（完整版）
+# 技术指标计算
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20:
@@ -104,13 +104,12 @@ def calculate_indicators(df):
     df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
     df['当日涨跌幅'] = abs(df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100
    
-    # 缩量
     df['缩量'] = df['volume'] < df['volume'].rolling(20).max() * 0.416
    
     return df
 
 # ==========================================
-# K线图（Gemini版完整保留）
+# K线图
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -143,7 +142,7 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 浩哥战法评分（专业版 + 7种浩哥战法体现 + 回测权重）
+# 浩哥战法评分（7种浩哥战法 + 回测权重 + 专业评论）
 # ==========================================
 def analyze_stock(df, name, current):
     if df is None or len(df) < 2:
@@ -166,7 +165,7 @@ def analyze_stock(df, name, current):
         '浩哥黄线战法': abs(last['close'] - safe_get('MA20', last['close'])) / last['close'] * 100 <= 1.5
     }
     
-    # 回测权重（胜率越高权重越高）
+    # 回测权重
     weights = {
         '浩哥超级战法': 25.0,
         '浩哥极缩战法': 22.0,
@@ -177,7 +176,7 @@ def analyze_stock(df, name, current):
         '浩哥缩量战法': 5.0
     }
     
-    # 技术分计算
+    # 技术分
     tech_score = 0.0
     triggered_signals = []
     for sig, active in signals.items():
@@ -185,7 +184,7 @@ def analyze_stock(df, name, current):
             tech_score += weights[sig]
             triggered_signals.append(sig)
     
-    # 低价股复活机制
+    # 低价股复活
     price_correction = 0.0
     if current < 12:
         price_correction = -5.0
@@ -197,7 +196,7 @@ def analyze_stock(df, name, current):
     
     tech_score = min(max(tech_score, 0), 70.0)
     
-    # AI 面（0-30）
+    # AI 面
     ai_score = 0.0
     lhb_net = get_lhb_data(symbol)
     if lhb_net > 0.5:
@@ -218,7 +217,7 @@ def analyze_stock(df, name, current):
     comment += f"【AI 面评分】{ai_score:.1f}/30\n"
     comment += f"【浩哥综合打分】{total_score:.1f}/100\n\n"
     
-    # 浩哥点评（专业版）
+    # 浩哥点评
     if total_score >= 85:
         comment += "浩哥认为当前形态与资金情绪高度共振，机会显著大于风险，属于较优的低吸/加仓窗口。"
         advice = "建议积极布局，仓位可适当加重，关注放量突破确认。"
@@ -235,7 +234,7 @@ def analyze_stock(df, name, current):
     return total_score, comment, advice
 
 # ==========================================
-# K线图（Gemini版完整保留）
+# K线图
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -297,7 +296,7 @@ if st.button("开始挖掘"):
             money_flow = get_money_flow(symbol)
            
             if df is not None:
-                score, comment, advice = analyze_logic(df, current_price, name, money_flow)
+                score, comment, advice = analyze_stock(df, name, current_price)
                
                 c1, c2 = st.columns([1, 3])
                 with c1:
