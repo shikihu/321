@@ -110,7 +110,7 @@ def analyze_stock(df, name, current, circ_mv, news, lhb_net):
         '超卖缩量B': 5.0
     }
     
-    # 模拟信号激活（实际可替换为完整条件判断）
+    # 模拟信号激活（实际替换为你的完整条件判断）
     tech_score = 0.0
     tech_score += weights['回踩超级B'] if np.random.rand() > 0.3 else 0.0
     tech_score += weights['超卖超缩量B'] if np.random.rand() > 0.4 else 0.0
