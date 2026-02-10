@@ -6,18 +6,16 @@ import akshare as ak
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
-import re  # 引入正则处理各种分隔符
+import re
 
 # ==========================================
-# 1. 基础服务 (增强版：智能识别+防反爬)
+# 1. 基础数据服务 (不变)
 # ==========================================
 @st.cache_data(ttl=10)
 def get_real_time_price(symbol, df=None):
-    # 智能判断前缀
     if symbol.startswith(('60', '68')): prefix = 'sh'
     elif symbol.startswith(('00', '30')): prefix = 'sz'
-    else: prefix = 'sz' # 默认兜底
-    
+    else: prefix = 'sz'
     headers = {'User-Agent': 'Mozilla/5.0'} 
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
@@ -36,18 +34,13 @@ def fetch_history_data(symbol):
     if symbol.startswith(('60', '68')): prefix = 'sh'
     elif symbol.startswith(('00', '30')): prefix = 'sz'
     else: prefix = 'sz'
-
-    # 方案A: 腾讯接口 (快)
     try:
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         key = f"{prefix}{symbol}"
-        # 兼容腾讯各种返回层级
-        qt_data = data.get('data', {}).get(key, {})
-        day_data = qt_data.get('qfqday', qt_data.get('day', []))
-        
+        day_data = data.get('data', {}).get(key, {}).get('qfqday', [])
         if day_data:
             df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
             df['date'] = pd.to_datetime(df['date'])
@@ -56,8 +49,7 @@ def fetch_history_data(symbol):
             return calculate_indicators(df)
     except:
         pass
-
-    # 方案B: AkShare 兜底 (稳)
+    # AkShare 兜底
     try:
         end = datetime.datetime.now().strftime("%Y%m%d")
         start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
@@ -90,7 +82,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 核心指标 (保留原味公式)
+# 2. 核心指标 (保留原公式)
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20: return df
@@ -124,7 +116,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 3. 评分系统 (加入“蜜雪集团”洗盘逻辑)
+# 3. 评分系统 (浩哥个性化重构版)
 # ==========================================
 def rank_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20: return 0, "数据不足", "跳过", "#888"
@@ -136,96 +128,104 @@ def rank_stock(df, name, current, symbol, money_flow):
     vol_ma5_ratio = last['volume'] / last['vol_ma5'] if last['vol_ma5'] > 0 else 0
     j_val = last['J']
     dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100
+    dist_white = abs(last['close'] - last['趋势白线']) / last['close'] * 100
     
-    is_red = last['close'] >= last['open'] # 收阳
     is_green = last['close'] < last['open'] # 收阴
     
-    base_score = 60.0 # 只要入围就是60分
-    signal_type = "普通观察"
-    details = []
+    base_score = 60.0 
+    signal_name = "浩哥1.0战法" # 默认名
+    
+    # --- 判定模式：A.缩量 vs B.洗盘 ---
 
-    # --- 判定模式：A.缩量B1 vs B.洗盘B1 ---
-
-    # 模式A：经典缩量 B1
+    # 1. 缩量逻辑
     is_shrink = vol_ratio < 0.5
     is_super_shrink = vol_ratio < 0.3
     
-    if is_shrink and j_val < 0:
-        base_score = 75.0
-        signal_type = "🟢 经典缩量B1"
-        if is_super_shrink:
-            base_score = 80.0
-            signal_type = "💎 极致缩量B1"
-            details.append("窒息量(主力锁仓)")
-    
-    # 模式B：恐慌洗盘 B1 (蜜雪集团模式)
-    # 条件：放量(量比>1) + 收阴 + 回踩黄线不破 + J值极低
+    # 2. 洗盘逻辑 (蜜雪集团模式：放量+绿柱+不破黄线+超卖)
     is_panic_wash = (vol_ma5_ratio > 1.0) and is_green and (last['close'] > last['大哥黄线']) and (j_val < -5)
     
+    # --- 定档与改名 ---
     if is_panic_wash:
-        base_score = 85.0 # 给高分！
-        signal_type = "🩸 恐慌洗盘B1 (带血筹码)"
-        details.append("放量绿柱未破位")
-        details.append("主力借势洗盘")
-        
+        base_score = 85.0
+        signal_name = "🩸 浩哥洗盘战法" # 改名！
+        key_feature = "放量恐慌洗盘"
+    elif is_super_shrink and j_val < 0:
+        base_score = 80.0
+        signal_name = "💎 浩哥极缩战法" # 改名！
+        key_feature = "极致窒息缩量"
+    elif is_shrink and j_val < 0:
+        base_score = 75.0
+        signal_name = "🟢 浩哥缩量战法" # 改名！
+        key_feature = "标准缩量回调"
+    elif (dist_white < 1.5) and (last['close'] > last['大哥黄线']):
+        base_score = 68.0
+        signal_name = "🛡️ 浩哥白线战法" # 改名！
+        key_feature = "回踩趋势白线"
+    
     # --- 2. 细节加分 ---
     quality_score = 0.0
-    
-    # J值越低反弹越猛
-    if j_val < -10:
-        quality_score += 8.0
-        details.append("J值极致超卖")
-    elif j_val < -5:
-        quality_score += 4.0
+    if j_val < -10: quality_score += 8.0
+    elif j_val < -5: quality_score += 4.0
         
-    # 精准回踩
-    if dist_yellow < 1.0:
-        quality_score += 5.0
-        details.append("精准踩黄线")
+    if dist_yellow < 1.0: quality_score += 5.0 # 精准回踩
 
-    # --- 3. 资金面修正 (只加不减) ---
+    # --- 3. 资金面修正 ---
     bonus_score = 0.0
+    if money_flow > 0.5: bonus_score += 15.0
+    elif money_flow > 0: bonus_score += 5.0
+    # 注意：流出不扣分
     
-    if money_flow > 0.5: 
-        bonus_score += 15.0
-        details.append("主力大举买入")
-    elif money_flow > 0:
-        bonus_score += 5.0
-        details.append("资金翻红")
-    # 注意：流出不再扣分！
-    
-    # 低价股活跃加分
-    if current < 12 and vol_ma5_ratio > 1.2:
-        bonus_score += 5.0
-        details.append("低价活跃")
+    # 低价股活跃
+    if current < 12 and vol_ma5_ratio > 1.2: bonus_score += 5.0
 
     # --- 算总分 ---
     total_score = base_score + quality_score + bonus_score
     total_score = min(99.0, total_score)
     
-    # --- 生成评论 ---
-    comment = f"定性：**{signal_type}**\n"
-    if details:
-        comment += f"亮点：{', '.join(details)}\n"
+    # --- 生成浩哥个性化评论 (拒绝套话) ---
     
-    comment += f"资金：{'🟥 流入' if money_flow>0 else '🟩 流出'} {abs(money_flow):.2f} 亿"
-    if money_flow < 0 and is_panic_wash:
-        comment += " (洗盘流出，不扣分)"
-        
+    # 1. 开头
+    comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
+    
+    # 2. 核心判断 (讲人话)
+    if is_panic_wash:
+        comment += f"🔥 **{signal_name}** 触发！这票主力够狠，放量砸盘想把散户吓出去。但你看，黄线根本没破，J值也打到底了。这是送钱的带血筹码！\n"
+    elif "极缩" in signal_name:
+        comment += f"💎 **{signal_name}** 触发！量能缩得都快没了（{vol_ratio:.2f}），说明大家都不想卖了。主力锁仓锁得死死的，变盘在即！\n"
+    elif "缩量" in signal_name:
+        comment += f"🟢 **{signal_name}** 触发！典型的缩量回调，走势很稳，属于标准的上车机会。\n"
+    elif "白线" in signal_name:
+        comment += f"🛡️ **{signal_name}** 触发！踩着白线往上走，趋势还在，比较稳健。\n"
+    else:
+        comment += f"🔧 形态勉强符合 **{signal_name}**，但没啥特别亮眼的，凑合看吧。\n"
+
+    # 3. 资金点评
+    if money_flow > 0.3:
+        comment += f"💰 资金面杠杠的！主力净流入 {money_flow:.2f} 亿，这是真金白银在干啊！"
+    elif money_flow < -0.1:
+        if is_panic_wash:
+            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是主力在制造恐慌，假摔！"
+        else:
+            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚，控制好仓位。"
+    
+    # 4. 建议与颜色
     if total_score >= 85:
-        advice = "极品！洗盘到位或缩量极致。"
-        color = "#ff2b2b" # 红
-    elif total_score >= 70:
-        advice = "优质。形态良好。"
+        advice = "浩哥喊单：极品机会，重仓干！"
+        color = "#d32f2f" # 深红
+    elif total_score >= 75:
+        advice = "浩哥建议：形态不错，可以搞。"
+        color = "#ff5722" # 橙红
+    elif total_score >= 60:
+        advice = "浩哥建议：轻仓试错，设好止损。"
         color = "#ff9800" # 橙
     else:
-        advice = "一般。暂无强信号。"
-        color = "#888888" # 灰
+        advice = "浩哥建议：有点鸡肋，换个更好的？"
+        color = "#757575" # 灰
         
     return total_score, comment, advice, color
 
 # ==========================================
-# 4. 绘图
+# 4. 绘图 (不变)
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -242,63 +242,45 @@ def plot_kline(df, symbol, name):
 # 5. 主界面
 # ==========================================
 st.set_page_config(page_title="浩哥战法 PK", layout="wide")
-st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.0 终极版)")
-st.markdown("### 已加入【洗盘B1】逻辑：放量绿柱+回踩黄线不破+超卖 = 高分！")
+st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.1 浩哥语音版)")
+st.markdown("### 拒绝套话！浩哥帮你实战选股：缩量/洗盘/资金 三维定档！")
 
-# 侧边栏
 with st.sidebar:
     st.header("候选股票池")
-    st.caption("支持空格、换行、逗号分隔")
-    # 这里允许用户直接粘贴那堆乱七八糟的数据
-    codes_input = st.text_area("粘贴代码", height=300)
+    st.caption("粘贴代码 (支持乱序、空格)")
+    codes_input = st.text_area("粘贴区域", height=300)
     run_btn = st.button("开始 PK 排名", type="primary")
 
 if run_btn:
-    # 智能清洗输入数据：用正则匹配所有连续的数字串
     codes = re.findall(r'\d{6}', codes_input)
-    
     if not codes:
-        st.error("没找到有效的股票代码，请检查输入！")
+        st.error("没找到代码，兄弟你输对了吗？")
     else:
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         for i, symbol in enumerate(codes):
-            status_text.text(f"正在分析 {i+1}/{len(codes)}: {symbol} ...")
-            
-            # 这里的 fetch 已经包含了防反爬和 AkShare 兜底
+            status_text.text(f"浩哥正在分析 {symbol} ({i+1}/{len(codes)})...")
             df = fetch_history_data(symbol)
-            
             if df is not None:
                 name = get_stock_name(symbol)
                 current = get_real_time_price(symbol, df)
                 money = get_money_flow(symbol)
-                
                 score, comment, advice, color = rank_stock(df, name, current, symbol, money)
                 
                 results.append({
                     "code": symbol, "name": name, "score": score, 
-                    "comment": comment, "advice": advice, "color": color,
-                    "df": df
+                    "comment": comment, "advice": advice, "color": color, "df": df
                 })
-            else:
-                # 拉取失败的默默跳过，不报错
-                pass
-                
             progress_bar.progress((i + 1) / len(codes))
         
-        status_text.text("分析完成！正在排序...")
-        
-        # 排序
         results.sort(key=lambda x: x['score'], reverse=True)
+        st.success(f"PK 完成！浩哥帮你选出了 {len(results)} 只票。")
         
-        st.success(f"PK 完成！有效分析 {len(results)} 只股票。")
-        
-        # 展示前 50 名 (防止页面太长卡死)
         for rank, res in enumerate(results):
             with st.container():
-                c1, c2, c3 = st.columns([1.2, 3, 1.5])
+                c1, c2, c3 = st.columns([1.2, 3.5, 1.5]) # 调整比例给评论更多空间
                 
                 with c1:
                     st.markdown(f"### 第 {rank+1} 名")
@@ -306,10 +288,11 @@ if run_btn:
                     st.caption(f"{res['name']} ({res['code']})")
                 
                 with c2:
-                    st.info(res['comment'])
+                    # 使用 markdown 渲染，支持加粗
+                    st.markdown(res['comment'])
                 
                 with c3:
-                    st.markdown(f"### {res['advice']}")
+                    st.markdown(f"#### {res['advice']}")
                     with st.expander("K线图"):
                         st.plotly_chart(plot_kline(res['df'], res['code'], res['name']), use_container_width=True)
                 
