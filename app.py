@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import requests
 import numpy as np
-import akshare as ak
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
@@ -15,13 +14,47 @@ import time
 st.set_page_config(page_title="浩哥战法量化终端 v4.0", layout="wide")
 
 # ==========================================
-# 缓存会话状态，避免重复拉取
+# 辅助函数：基本面、情绪面、消息面（完整定义）
 # ==========================================
-if 'stock_data_cache' not in st.session_state:
-    st.session_state.stock_data_cache = {}
+def get_basic_face(symbol):
+    try:
+        df = ak.stock_individual_info_em(symbol=str(symbol))
+        pe = float(df[df['项目'] == '市盈率']['值'].values[0]) if '市盈率' in df['项目'].values else 0
+        pb = float(df[df['项目'] == '市净率']['值'].values[0]) if '市净率' in df['项目'].values else 0
+        roe = float(df[df['项目'] == '净资产收益率']['值'].values[0]) if '净资产收益率' in df['项目'].values else 0
+        score = 0
+        if pe > 0 and pe < 30: score += 8
+        if pb > 0 and pb < 3: score += 6
+        if roe > 10: score += 6
+        return min(20, score)
+    except Exception as e:
+        st.warning(f"基本面获取失败 ({symbol}): {str(e)[:80]}...")
+        return 0
+
+def get_emotion_face(df):
+    if df is None or len(df) < 1:
+        return 0
+    last = df.iloc[-1]
+    # 换手率简化（如果没有流通股本，用成交量代理）
+    turnover = last.get('volume', 0) / 100000000  # 假设流通股本大
+    score = 0
+    if turnover < 0.08: score += 10
+    elif turnover < 0.15: score += 5
+    return score
+
+def get_news_face(symbol):
+    try:
+        news = ak.stock_news_em(symbol=str(symbol))
+        if not news.empty:
+            sentiment = news['标题'].str.contains('好|利好|上涨|爆拉|涨停').sum() - news['标题'].str.contains('坏|利空|下跌|暴跌|跌停').sum()
+            score = min(15, max(0, sentiment * 3))
+            return score
+    except Exception as e:
+        st.warning(f"消息面获取失败 ({symbol}): {str(e)[:80]}...")
+        return 0
 
 # ==========================================
-# 数据服务（优先腾讯 + 缓存 + 容错）
+# 数据服务（只用腾讯 + 缓存）
 # ==========================================
 @st.cache_data(ttl=1800)  # 缓存30分钟
 def get_real_time_price(symbol, df=None):
@@ -45,18 +78,14 @@ def get_real_time_price(symbol, df=None):
 @st.cache_data(ttl=7200)  # 缓存2小时
 def fetch_history_data(symbol):
     symbol = str(symbol).strip()
-    if symbol in st.session_state.stock_data_cache:
-        st.write(f"{symbol} 命中缓存")
-        return st.session_state.stock_data_cache[symbol]
-    
     st.write(f"开始拉取 {symbol} 历史数据...")
     
-    # 只用腾讯接口（你日志显示它成功）
     try:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=10)
+        st.write(f"{symbol} 腾讯接口状态码: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
@@ -71,9 +100,7 @@ def fetch_history_data(symbol):
                     st.warning(f"{symbol} 数据条数不足 ({len(df)}条)")
                     return None
                 st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
-                df = calculate_indicators(df)
-                st.session_state.stock_data_cache[symbol] = df
-                return df
+                return calculate_indicators(df)
         else:
             st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
     except Exception as e:
@@ -104,7 +131,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 技术指标计算（已修复位运算bug）
+# 技术指标计算（修复位运算bug）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -253,7 +280,24 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 评分系统（价位动态权重 + 只取最高胜率信号）
+# 3. K线图
+# ==========================================
+def plot_kline(df, symbol, name):
+    df = df.iloc[-120:]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='趋势白线'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
+    colors = ['#ef5350' if row['close'] >= row['open'] else '#26a69a' for i, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
+    fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=False,
+                      plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor='#333333')
+    return fig
+
+# ==========================================
+# 4. 评分系统（价位动态权重 + 只取最高胜率信号）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -354,14 +398,14 @@ def analyze_stock(df, name, current, symbol, money_flow):
 # ==========================================
 # 主界面
 # ==========================================
-st.title("浩哥战法量化终端 v4.0 (优化版)")
-codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多300只）", height=150)
+st.title("浩哥战法量化终端 v4.0 (修复版)")
+codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多50只）", height=150)
 if st.button("🚀 开始分析"):
     if not codes_input.strip():
         st.warning("请先输入股票代码！")
     else:
         codes = re.findall(r'\d{6}', codes_input)
-        all_codes = list(set(codes))[:50]  # 先限50只，防止卡死
+        all_codes = list(set(codes))[:50]
        
         if not all_codes:
             st.error("没找到有效的股票代码")
@@ -391,7 +435,7 @@ if st.button("🚀 开始分析"):
                         "source": source
                     })
                 progress_bar.progress((i + 1) / len(all_codes))
-                time.sleep(0.1)  # 避免服务器限流
+                time.sleep(0.2)  # 避免请求太快被限流
             
             status_text.text("分析完成！")
            
