@@ -9,7 +9,50 @@ import datetime
 import re
 
 # ==========================================
-# 1. 数据服务（你提供的最新版，已保留日志和容错）
+# 页面配置
+# ==========================================
+st.set_page_config(page_title="浩哥战法", layout="wide")
+
+# ==========================================
+# 辅助函数：基本面、情绪面、消息面
+# ==========================================
+def get_basic_face(symbol):
+    try:
+        df = ak.stock_individual_info_em(symbol=str(symbol))
+        pe = float(df[df['项目'] == '市盈率']['值'].values[0]) if '市盈率' in df['项目'].values else 0
+        pb = float(df[df['项目'] == '市净率']['值'].values[0]) if '市净率' in df['项目'].values else 0
+        roe = float(df[df['项目'] == '净资产收益率']['值'].values[0]) if '净资产收益率' in df['项目'].values else 0
+        score = 0
+        if pe > 0 and pe < 30: score += 8
+        if pb > 0 and pb < 3: score += 6
+        if roe > 10: score += 6
+        return min(20, score)
+    except:
+        return 0
+
+def get_emotion_face(df):
+    if df is None or len(df) < 1:
+        return 0
+    last = df.iloc[-1]
+    # 假设有流通股本列（如果没有，默认0）
+    turnover = last.get('volume', 0) / last.get('流通股本', 1) if '流通股本' in last else 0
+    score = 0
+    if turnover < 0.08: score += 10
+    elif turnover < 0.15: score += 5
+    return score
+
+def get_news_face(symbol):
+    try:
+        news = ak.stock_news_em(symbol=str(symbol))
+        if not news.empty:
+            sentiment = news['标题'].str.contains('好|利好|上涨|爆拉|涨停').sum() - news['标题'].str.contains('坏|利空|下跌|暴跌|跌停').sum()
+            score = min(15, max(0, sentiment * 3))
+            return score
+    except:
+        return 0
+
+# ==========================================
+# 数据服务
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
@@ -25,7 +68,7 @@ def get_real_time_price(symbol, df=None):
             if len(parts) > 3 and float(parts[3]) > 0:
                 return float(parts[3]), "实时价"
     except Exception as e:
-        pass  # 静默失败，使用收盘价
+        pass
     if df is not None and not df.empty:
         return df['close'].iloc[-1], "(盘后/最近收盘价)"
     return 0.0, "无数据"
@@ -33,6 +76,8 @@ def get_real_time_price(symbol, df=None):
 @st.cache_data(ttl=3600)
 def fetch_history_data(symbol):
     symbol = str(symbol).strip()
+    st.write(f"开始拉取 {symbol} 历史数据...")
+    
     # 优先 AkShare
     try:
         end = datetime.datetime.now().strftime("%Y%m%d")
@@ -42,16 +87,18 @@ def fetch_history_data(symbol):
             df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
+            st.write(f"{symbol} AkShare 成功，拉到 {len(df)} 条")
             return calculate_indicators(df)
     except Exception as e:
-        pass  # AkShare失败，尝试腾讯
-   
+        st.error(f"{symbol} AkShare 异常: {str(e)[:150]}...")
+    
     # 腾讯备用
     try:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=10)
+        st.write(f"{symbol} 腾讯接口状态码: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
@@ -62,10 +109,14 @@ def fetch_history_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
+                st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
                 return calculate_indicators(df)
+        else:
+            st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
     except Exception as e:
-        st.error(f"{symbol} 数据获取异常: {str(e)[:50]}")
-   
+        st.error(f"{symbol} 腾讯异常: {str(e)[:150]}...")
+    
+    st.error(f"{symbol} 所有数据源失败，无法分析")
     return None
 
 def get_stock_name(symbol):
@@ -97,7 +148,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 技术指标计算（已修复位运算bug）
+# 技术指标计算（修复所有位运算bug）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -140,6 +191,12 @@ def calculate_indicators(df):
     ema_down = down.ewm(com=13, adjust=False).mean()
     rs = ema_up / ema_down
     df['RSI'] = 100 - (100 / (1 + rs))
+   
+    exp12 = df['close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd_dif'] = exp12 - exp26
+    df['macd_dea'] = df['macd_dif'].ewm(span=9, adjust=False).mean()
+    df['macd'] = (df['macd_dif'] - df['macd_dea']) * 2
    
     df['vol_max20'] = df['volume'].rolling(20, min_periods=1).max()
     df['vol_ma5'] = df['volume'].rolling(5, min_periods=1).mean()
@@ -240,24 +297,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 3. K线图
-# ==========================================
-def plot_kline(df, symbol, name):
-    df = df.iloc[-120:]
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='趋势白线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
-    colors = ['#ef5350' if row['close'] >= row['open'] else '#26a69a' for i, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=False,
-                      plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(showgrid=True, gridcolor='#333333')
-    return fig
-
-# ==========================================
-# 4. 评分系统（最新版：价位动态权重 + 只取最高胜率信号）
+# 评分系统（最新版：价位动态权重 + 只取最高胜率信号）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -265,7 +305,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     last = df.iloc[-1]
    
-    # 价位判断（用收盘价或实时价）
+    # 价位判断
     price = current if current > 0 else last['close']
     if price <= 12:
         tier = 'low'
@@ -274,7 +314,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
     else:
         tier = 'high'
    
-    # 信号胜率表（5日胜率，来自回测）
+    # 信号胜率表（5日胜率）
     signal_win = {
         '浩哥缩量战法': {'low': 54, 'mid': 58, 'high': 56},
         '浩哥极缩战法': {'low': 59, 'mid': 63, 'high': 61},
@@ -285,19 +325,16 @@ def analyze_stock(df, name, current, symbol, money_flow):
         '浩哥1.0战法': {'low': 51, 'mid': 54, 'high': 52},
     }
     
-    # 收集触发的信号及其胜率
     triggered = []
     for sig, win_dict in signal_win.items():
-        if last.get(sig, False):  # 假设df列名为sig
+        if last.get(sig, False):
             triggered.append((sig, win_dict[tier]))
     
     if not triggered:
         tech_score = 0.0
         main_sig = "无信号"
     else:
-        # 取胜率最高的信号
         main_sig, win_rate = max(triggered, key=lambda x: x[1])
-        
         # 胜率映射到0~50分
         if win_rate <= 40:
             tech_score = 0
@@ -308,21 +345,15 @@ def analyze_stock(df, name, current, symbol, money_flow):
         elif win_rate <= 65:
             tech_score = 35 + (win_rate - 60) / 5 * 10
         else:
-            tech_score = 45 + (win_rate - 65) / 5 * 5  # 上限50
+            tech_score = 45 + (win_rate - 65) / 5 * 5
         tech_score = min(50, max(0, tech_score))
     
-    # 基本面20分
     basic_score = get_basic_face(symbol)
-    
-    # 情绪面15分
     emotion_score = get_emotion_face(df)
-    
-    # 消息面15分
     news_score = get_news_face(symbol)
     
     total_score = tech_score + basic_score + emotion_score + news_score
     
-    # 详细技术面观察
     obs_lines = []
     macd = last.get('macd', 0)
     if macd > 0:
@@ -342,7 +373,6 @@ def analyze_stock(df, name, current, symbol, money_flow):
     
     obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
     
-    # 浩哥风格评论
     comment = f"浩哥对 **{name}** ({symbol}) 的判断：当前价 {current:.2f} 元。\n\n"
     
     if main_sig != "无信号":
@@ -356,7 +386,6 @@ def analyze_stock(df, name, current, symbol, money_flow):
     
     comment += f"💰 **资金**：主力净流入 {money_flow:.2f} 亿。"
     
-    # 建议
     if total_score >= 80:
         advice = "形态完美，主力资金配合，建议重点关注！"
     elif total_score >= 60:
@@ -375,11 +404,10 @@ if st.button("🚀 开始分析"):
     if not codes_input.strip():
         st.warning("请先输入股票代码！")
     else:
-        # 正则提取6位数字代码 + 港股4位
         codes = re.findall(r'\d{6}', codes_input)
         hk_codes = re.findall(r'\b\d{4,5}\b', codes_input)
-        all_codes = list(set(codes + hk_codes))[:50]  # 限50只防止卡死
-        
+        all_codes = list(set(codes + hk_codes))[:50]
+       
         if not all_codes:
             st.error("没找到有效的股票代码")
         else:
@@ -409,13 +437,12 @@ if st.button("🚀 开始分析"):
                             "source": source
                         })
                 except Exception as e:
-                    st.error(f"{symbol} 分析出错: {e}")
+                    st.error(f"{symbol} 分析出错: {str(e)[:100]}")
                
                 progress_bar.progress((i + 1) / len(all_codes))
            
             status_text.text("分析完成！")
            
-            # 按分数排序
             results.sort(key=lambda x: x['score'], reverse=True)
            
             st.success(f"分析完成！共 {len(results)} 只有效股票")
