@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import numpy as np
+import akshare as ak  # 必须在最前面，确保加载
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
@@ -14,7 +15,7 @@ import time
 st.set_page_config(page_title="浩哥战法量化终端 v4.0", layout="wide")
 
 # ==========================================
-# 辅助函数：基本面、情绪面、消息面（完整定义）
+# 辅助函数：基本面、情绪面、消息面（完整定义 + 容错）
 # ==========================================
 def get_basic_face(symbol):
     try:
@@ -35,8 +36,7 @@ def get_emotion_face(df):
     if df is None or len(df) < 1:
         return 0
     last = df.iloc[-1]
-    # 换手率简化（如果没有流通股本，用成交量代理）
-    turnover = last.get('volume', 0) / 100000000  # 假设流通股本大
+    turnover = last.get('volume', 0) / 100000000  # 简化换手率计算
     score = 0
     if turnover < 0.08: score += 10
     elif turnover < 0.15: score += 5
@@ -56,7 +56,7 @@ def get_news_face(symbol):
 # ==========================================
 # 数据服务（只用腾讯 + 缓存）
 # ==========================================
-@st.cache_data(ttl=1800)  # 缓存30分钟
+@st.cache_data(ttl=1800)
 def get_real_time_price(symbol, df=None):
     symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
@@ -75,7 +75,7 @@ def get_real_time_price(symbol, df=None):
         return df['close'].iloc[-1], "(盘后/最近收盘价)"
     return 0.0, "无数据"
 
-@st.cache_data(ttl=7200)  # 缓存2小时
+@st.cache_data(ttl=7200)
 def fetch_history_data(symbol):
     symbol = str(symbol).strip()
     st.write(f"开始拉取 {symbol} 历史数据...")
@@ -85,7 +85,6 @@ def fetch_history_data(symbol):
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=10)
-        st.write(f"{symbol} 腾讯接口状态码: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
@@ -198,7 +197,6 @@ def calculate_indicators(df):
     df['近期振幅'] = (df['high'].rolling(20).max() - df['low'].rolling(20).min()) / df['low'].rolling(20).min() * 100
     df['远期振幅'] = (df['high'].rolling(50).max() - df['low'].rolling(50).min()) / df['low'].rolling(50).min() * 100
    
-    # 修复位运算bug：加完整括号 + astype(bool) 兜底
     df['做上涨趋势'] = (
         (df['趋势白线'] >= df['大哥黄线'] * 0.999).astype(bool) & 
         (
@@ -220,7 +218,6 @@ def calculate_indicators(df):
         ((df['close'] < df['大哥黄线']).astype(bool) & (df['距离黄线'] <= 0.8))
     ).astype(bool)
    
-    # 信号判断（7种战法）
     df['浩哥缩量战法'] = (
         df['做上涨趋势'] &
         (df['J'] < 14) &
@@ -280,7 +277,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 3. K线图
+# K线图
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -297,7 +294,7 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 4. 评分系统（价位动态权重 + 只取最高胜率信号）
+# 评分系统（价位动态权重 + 只取最高胜率信号）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -335,7 +332,6 @@ def analyze_stock(df, name, current, symbol, money_flow):
         main_sig = "无信号"
     else:
         main_sig, win_rate = max(triggered, key=lambda x: x[1])
-        # 胜率映射到0~50分
         if win_rate <= 40:
             tech_score = 0
         elif win_rate <= 50:
