@@ -33,21 +33,21 @@ def get_basic_face(symbol):
         if '市盈率' in df['项目'].values:
             pe_val = df[df['项目'] == '市盈率']['值'].values[0]
             try:
-                pe = float(pe_val) if pd.notna(pe_val) else 0
+                pe = float(pe_val) if pd.notna(pe_val) and pe_val != '' else 0
             except:
                 pe = 0
                 
         if '市净率' in df['项目'].values:
             pb_val = df[df['项目'] == '市净率']['值'].values[0]
             try:
-                pb = float(pb_val) if pd.notna(pb_val) else 0
+                pb = float(pb_val) if pd.notna(pb_val) and pb_val != '' else 0
             except:
                 pb = 0
                 
         if '净资产收益率' in df['项目'].values:
             roe_val = df[df['项目'] == '净资产收益率']['值'].values[0]
             try:
-                roe = float(roe_val) if pd.notna(roe_val) else 0
+                roe = float(roe_val) if pd.notna(roe_val) and roe_val != '' else 0
             except:
                 roe = 0
         
@@ -57,7 +57,7 @@ def get_basic_face(symbol):
         if roe > 10: score += 6
         return min(20, score)
     except Exception as e:
-        st.warning(f"基本面获取失败 ({symbol}): {str(e)[:80]}...")
+        st.warning(f"基本面获取失败 ({symbol}): {type(e).__name__}: {str(e)[:80]}...")
         return 0
 
 def get_emotion_face(df):
@@ -80,8 +80,8 @@ def get_news_face(symbol):
         news = ak.stock_news_em(symbol=str(symbol))
         if news is not None and not news.empty and '标题' in news.columns:
             # 检查标题列是否存在
-            positive_keywords = ['好', '利好', '上涨', '爆拉', '涨停', '增长', '业绩', '利好消息']
-            negative_keywords = ['坏', '利空', '下跌', '暴跌', '跌停', '亏损', '风险', '减持']
+            positive_keywords = ['好', '利好', '上涨', '爆拉', '涨停', '增长', '业绩', '利好消息', '增持', '回购']
+            negative_keywords = ['坏', '利空', '下跌', '暴跌', '跌停', '亏损', '风险', '减持', '处罚', '诉讼']
             
             title_text = ' '.join(news['标题'].astype(str).tolist())
             pos_count = sum(1 for keyword in positive_keywords if keyword in title_text)
@@ -93,7 +93,7 @@ def get_news_face(symbol):
         else:
             return 0
     except Exception as e:
-        st.warning(f"消息面获取失败 ({symbol}): {str(e)[:80]}...")
+        st.warning(f"消息面获取失败 ({symbol}): {type(e).__name__}: {str(e)[:80]}...")
         return 0
 
 # ==========================================
@@ -107,11 +107,12 @@ def get_real_time_price(symbol, df=None):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': '*/*',
-        'Referer': 'http://finance.sina.com.cn/'
+        'Referer': 'http://finance.sina.com.cn/',
+        'Connection': 'keep-alive'
     }
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
-        r = requests.get(url, headers=headers, timeout=8)  # 增加超时时间
+        r = requests.get(url, headers=headers, timeout=10)  # 增加超时时间
         if 'var hq_str_' in r.text:
             parts = r.text.split('"')[1].split(',')
             if len(parts) > 3 and parts[3] != '':
@@ -121,8 +122,10 @@ def get_real_time_price(symbol, df=None):
                         return price, "实时价"
                 except ValueError:
                     pass
+    except requests.exceptions.RequestException as e:
+        st.warning(f"实时价格获取网络错误 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
     except Exception as e:
-        st.warning(f"实时价格获取失败 ({symbol}): {str(e)[:50]}...")
+        st.warning(f"实时价格获取其他错误 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
         pass
     
     if df is not None and not df.empty:
@@ -140,9 +143,25 @@ def fetch_history_data(symbol):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
-            'Referer': 'https://gu.qq.com/'
+            'Referer': 'https://gu.qq.com/',
+            'Connection': 'keep-alive'
         }
-        r = requests.get(url, headers=headers, timeout=15)  # 增加超时时间
+        
+        # 尝试多次请求
+        for attempt in range(3):
+            try:
+                r = requests.get(url, headers=headers, timeout=20)  # 增加超时时间
+                if r.status_code == 200:
+                    break
+                elif attempt < 2:
+                    time.sleep(2)  # 等待2秒后重试
+            except requests.exceptions.RequestException as e:
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise e
+        
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -169,8 +188,12 @@ def fetch_history_data(symbol):
                 st.error(f"{symbol} 返回数据格式错误")
         else:
             st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
+    except requests.exceptions.ConnectionError as e:
+        st.error(f"{symbol} 网络连接错误: {str(e)[:150]}...")
+    except requests.exceptions.Timeout as e:
+        st.error(f"{symbol} 请求超时: {str(e)[:150]}...")
     except Exception as e:
-        st.error(f"{symbol} 腾讯异常: {str(e)[:150]}...")
+        st.error(f"{symbol} 其他异常: {type(e).__name__}: {str(e)[:150]}...")
     
     st.error(f"{symbol} 数据拉取失败")
     return None
@@ -181,12 +204,13 @@ def get_stock_name(symbol):
         if df is not None and not df.empty and '项目' in df.columns and '值' in df.columns:
             if '股票简称' in df['项目'].values:
                 name = df[df['项目'] == '股票简称']['值'].values[0]
-                return name if pd.notna(name) else symbol
+                return str(name) if pd.notna(name) and name != '' else symbol
             else:
                 return symbol
         else:
             return symbol
-    except:
+    except Exception as e:
+        st.warning(f"股票名称获取失败 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
         return symbol
 
 @st.cache_data(ttl=1800)
@@ -204,10 +228,11 @@ def get_money_flow(symbol):
                 except:
                     val = 0.0
             return val / 100000000
+        else:
+            return 0.0
     except Exception as e:
-        st.warning(f"资金流获取失败 ({symbol}): {str(e)[:50]}...")
-        pass
-    return 0.0
+        st.warning(f"资金流获取失败 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
+        return 0.0
 
 # ==========================================
 # 技术指标计算（修复位运算bug）
@@ -353,7 +378,8 @@ def calculate_indicators(df):
         (df['当日振幅'] < 8)
     ).astype(bool)
    
-    df = df.fillna(method='ffill').fillna(method='bfill')
+    # 修复FutureWarning：使用ffill()和bfill()替代fillna(method=...)
+    df = df.ffill().bfill()
     return df
 
 # ==========================================
@@ -516,7 +542,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
 # ==========================================
 # 主界面
 # ==========================================
-st.title("浩哥战法量化终端 v4.0 (修复版)")
+st.title("浩哥战法量化终端 v4.0 (最终修复版)")
 codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多50只）", height=150)
 if st.button("🚀 开始分析"):
     if not codes_input.strip():
@@ -556,7 +582,7 @@ if st.button("🚀 开始分析"):
                     st.warning(f"跳过 {symbol} - 数据获取失败")
                 
                 progress_bar.progress((i + 1) / len(all_codes))
-                time.sleep(0.5)  # 增加延时，避免请求过于频繁
+                time.sleep(0.8)  # 增加延时，避免请求过于频繁
             
             status_text.text("分析完成！")
            
