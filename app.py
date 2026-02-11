@@ -8,6 +8,8 @@ from plotly.subplots import make_subplots
 import datetime
 import re
 import time
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
 # 页面配置
@@ -20,9 +22,35 @@ st.set_page_config(page_title="浩哥战法量化终端 v4.0", layout="wide")
 def get_basic_face(symbol):
     try:
         df = ak.stock_individual_info_em(symbol=str(symbol))
-        pe = float(df[df['项目'] == '市盈率']['值'].values[0]) if '市盈率' in df['项目'].values else 0
-        pb = float(df[df['项目'] == '市净率']['值'].values[0]) if '市净率' in df['项目'].values else 0
-        roe = float(df[df['项目'] == '净资产收益率']['值'].values[0]) if '净资产收益率' in df['项目'].values else 0
+        if df is None or df.empty:
+            return 0
+        
+        # 获取各项指标，使用更灵活的方式
+        pe = 0
+        pb = 0
+        roe = 0
+        
+        if '市盈率' in df['项目'].values:
+            pe_val = df[df['项目'] == '市盈率']['值'].values[0]
+            try:
+                pe = float(pe_val) if pd.notna(pe_val) else 0
+            except:
+                pe = 0
+                
+        if '市净率' in df['项目'].values:
+            pb_val = df[df['项目'] == '市净率']['值'].values[0]
+            try:
+                pb = float(pb_val) if pd.notna(pb_val) else 0
+            except:
+                pb = 0
+                
+        if '净资产收益率' in df['项目'].values:
+            roe_val = df[df['项目'] == '净资产收益率']['值'].values[0]
+            try:
+                roe = float(roe_val) if pd.notna(roe_val) else 0
+            except:
+                roe = 0
+        
         score = 0
         if pe > 0 and pe < 30: score += 8
         if pb > 0 and pb < 3: score += 6
@@ -36,19 +64,34 @@ def get_emotion_face(df):
     if df is None or len(df) < 1:
         return 0
     last = df.iloc[-1]
-    turnover = last.get('volume', 0) / 100000000  # 简化换手率计算
-    score = 0
-    if turnover < 0.08: score += 10
-    elif turnover < 0.15: score += 5
-    return score
+    # 改进换手率计算逻辑
+    volume = last.get('volume', 0)
+    if volume > 0:
+        turnover = volume / 100000000  # 简化换手率计算
+        score = 0
+        if turnover < 0.08: score += 10
+        elif turnover < 0.15: score += 5
+        return score
+    else:
+        return 0
 
 def get_news_face(symbol):
     try:
         news = ak.stock_news_em(symbol=str(symbol))
-        if not news.empty:
-            sentiment = news['标题'].str.contains('好|利好|上涨|爆拉|涨停').sum() - news['标题'].str.contains('坏|利空|下跌|暴跌|跌停').sum()
+        if news is not None and not news.empty and '标题' in news.columns:
+            # 检查标题列是否存在
+            positive_keywords = ['好', '利好', '上涨', '爆拉', '涨停', '增长', '业绩', '利好消息']
+            negative_keywords = ['坏', '利空', '下跌', '暴跌', '跌停', '亏损', '风险', '减持']
+            
+            title_text = ' '.join(news['标题'].astype(str).tolist())
+            pos_count = sum(1 for keyword in positive_keywords if keyword in title_text)
+            neg_count = sum(1 for keyword in negative_keywords if keyword in title_text)
+            
+            sentiment = pos_count - neg_count
             score = min(15, max(0, sentiment * 3))
             return score
+        else:
+            return 0
     except Exception as e:
         st.warning(f"消息面获取失败 ({symbol}): {str(e)[:80]}...")
         return 0
@@ -61,16 +104,27 @@ def get_real_time_price(symbol, df=None):
     symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
     if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': '*/*',
+        'Referer': 'http://finance.sina.com.cn/'
+    }
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=8)  # 增加超时时间
         if 'var hq_str_' in r.text:
             parts = r.text.split('"')[1].split(',')
-            if len(parts) > 3 and float(parts[3]) > 0:
-                return float(parts[3]), "实时价"
-    except:
+            if len(parts) > 3 and parts[3] != '':
+                try:
+                    price = float(parts[3])
+                    if price > 0:
+                        return price, "实时价"
+                except ValueError:
+                    pass
+    except Exception as e:
+        st.warning(f"实时价格获取失败 ({symbol}): {str(e)[:50]}...")
         pass
+    
     if df is not None and not df.empty:
         return df['close'].iloc[-1], "(盘后/最近收盘价)"
     return 0.0, "无数据"
@@ -83,23 +137,36 @@ def fetch_history_data(symbol):
     try:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': 'https://gu.qq.com/'
+        }
+        r = requests.get(url, headers=headers, timeout=15)  # 增加超时时间
         if r.status_code == 200:
-            data = r.json()
-            key = f"{prefix}{symbol}"
-            qt_data = data.get('data', {}).get(key, {})
-            day_data = qt_data.get('qfqday', qt_data.get('day', []))
-            if day_data:
-                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                df = df.apply(pd.to_numeric, errors='coerce')
-                if len(df) < 50:
-                    st.warning(f"{symbol} 数据条数不足 ({len(df)}条)")
-                    return None
-                st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
-                return calculate_indicators(df)
+            try:
+                data = r.json()
+                key = f"{prefix}{symbol}"
+                qt_data = data.get('data', {}).get(key, {})
+                day_data = qt_data.get('qfqday', qt_data.get('day', []))
+                if day_data:
+                    df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                    df['date'] = pd.to_datetime(df['date'])
+                    df.set_index('date', inplace=True)
+                    df = df.apply(pd.to_numeric, errors='coerce')
+                    
+                    # 删除含有过多NaN值的行
+                    df = df.dropna(thresh=4)  # 至少保留4个非NaN值的行
+                    
+                    if len(df) < 50:
+                        st.warning(f"{symbol} 数据条数不足 ({len(df)}条)")
+                        return None
+                    st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
+                    return calculate_indicators(df)
+                else:
+                    st.warning(f"{symbol} 没有返回有效数据")
+            except ValueError:
+                st.error(f"{symbol} 返回数据格式错误")
         else:
             st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
     except Exception as e:
@@ -111,7 +178,14 @@ def fetch_history_data(symbol):
 def get_stock_name(symbol):
     try:
         df = ak.stock_individual_info_em(symbol=str(symbol))
-        return df[df['项目'] == '股票简称']['值'].values[0]
+        if df is not None and not df.empty and '项目' in df.columns and '值' in df.columns:
+            if '股票简称' in df['项目'].values:
+                name = df[df['项目'] == '股票简称']['值'].values[0]
+                return name if pd.notna(name) else symbol
+            else:
+                return symbol
+        else:
+            return symbol
     except:
         return symbol
 
@@ -120,12 +194,18 @@ def get_money_flow(symbol):
     try:
         market = "sh" if str(symbol).startswith('6') else "sz"
         flow = ak.stock_individual_fund_flow(stock=str(symbol), market=market)
-        if not flow.empty:
+        if flow is not None and not flow.empty and '主力净流入-净额' in flow.columns:
             val = flow.iloc[0]['主力净流入-净额']
             if isinstance(val, str):
-                val = float(val)
+                # 处理字符串格式的数值，如 "1.23亿"
+                val = val.replace('万', '').replace('亿', '')
+                try:
+                    val = float(val)
+                except:
+                    val = 0.0
             return val / 100000000
-    except:
+    except Exception as e:
+        st.warning(f"资金流获取失败 ({symbol}): {str(e)[:50]}...")
         pass
     return 0.0
 
@@ -273,7 +353,7 @@ def calculate_indicators(df):
         (df['当日振幅'] < 8)
     ).astype(bool)
    
-    df = df.ffill().bfill()
+    df = df.fillna(method='ffill').fillna(method='bfill')
     return df
 
 # ==========================================
@@ -282,13 +362,49 @@ def calculate_indicators(df):
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='趋势白线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
+    
+    # 添加K线
+    fig.add_trace(go.Candlestick(
+        x=df.index, 
+        open=df['open'], 
+        high=df['high'], 
+        low=df['low'], 
+        close=df['close'], 
+        name='K线'
+    ), row=1, col=1)
+    
+    # 添加趋势线
+    fig.add_trace(go.Scatter(
+        x=df.index, 
+        y=df['趋势白线'], 
+        line=dict(color='white', width=1), 
+        name='趋势白线'
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(
+        x=df.index, 
+        y=df['大哥黄线'], 
+        line=dict(color='yellow', width=1.5), 
+        name='大哥黄线'
+    ), row=1, col=1)
+    
+    # 添加成交量
     colors = ['#ef5350' if row['close'] >= row['open'] else '#26a69a' for i, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=False,
-                      plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
+    fig.add_trace(go.Bar(
+        x=df.index, 
+        y=df['volume'], 
+        marker_color=colors, 
+        name='成交量'
+    ), row=2, col=1)
+    
+    fig.update_layout(
+        title=f"{name} ({symbol}) - 浩哥专用图表", 
+        height=600, 
+        xaxis_rangeslider_visible=False,
+        plot_bgcolor='#1e1e1e', 
+        paper_bgcolor='#0e1117', 
+        font=dict(color='white')
+    )
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=True, gridcolor='#333333')
     return fig
@@ -324,7 +440,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
     
     triggered = []
     for sig, win_dict in signal_win.items():
-        if last.get(sig, False):
+        if sig in df.columns and last.get(sig, False):
             triggered.append((sig, win_dict[tier]))
     
     if not triggered:
@@ -357,15 +473,21 @@ def analyze_stock(df, name, current, symbol, money_flow):
     else:
         obs_lines.append("MACD绿柱状态，动能偏弱")
     
-    if last['volume'] < last['vol_max20'] * 0.6:
-        obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
+    if 'vol_max20' in df.columns and 'volume' in df.columns:
+        if last['volume'] < last['vol_max20'] * 0.6:
+            obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
+        else:
+            obs_lines.append("成交量温和或放大，资金分歧较大")
     else:
-        obs_lines.append("成交量温和或放大，资金分歧较大")
+        obs_lines.append("量能信息暂不可用")
     
-    if last['MA5'] > last['MA20'] > last['MA60']:
-        obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
-    elif last['close'] < last['MA20']:
-        obs_lines.append("股价跌破大哥黄线，注意风险")
+    if 'MA20' in df.columns and 'MA5' in df.columns and 'MA60' in df.columns:
+        if last['MA5'] > last['MA20'] > last['MA60']:
+            obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
+        elif 'close' in df.columns and last['close'] < last['MA20']:
+            obs_lines.append("股价跌破大哥黄线，注意风险")
+    else:
+        obs_lines.append("均线信息暂不可用")
     
     obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
     
@@ -430,8 +552,11 @@ if st.button("🚀 开始分析"):
                         "df": df,
                         "source": source
                     })
+                else:
+                    st.warning(f"跳过 {symbol} - 数据获取失败")
+                
                 progress_bar.progress((i + 1) / len(all_codes))
-                time.sleep(0.2)  # 避免请求太快被限流
+                time.sleep(0.5)  # 增加延时，避免请求过于频繁
             
             status_text.text("分析完成！")
            
