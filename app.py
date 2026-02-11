@@ -9,26 +9,21 @@ import datetime
 import re
 
 # ==========================================
-# 1. 数据服务（修复版，支持港股）
+# 数据服务（稳定版）
 # ==========================================
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
     symbol = str(symbol)
-    if symbol.startswith(('60', '68')): prefix = 'sh'
-    elif symbol.startswith(('00', '30')): prefix = 'sz'
-    else: prefix = 'hk' if len(symbol) == 4 else 'sz'
-    
+    prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
         r = requests.get(url, headers=headers, timeout=3)
-        if 'var hq_str_' in r.text:
-            parts = r.text.split('"')[1].split(',')
-            if len(parts) > 3 and float(parts[3]) > 0:
-                return float(parts[3]), "实时价"
+        parts = r.text.split('"')[1].split(',')
+        if len(parts) > 3 and float(parts[3]) > 0:
+            return float(parts[3]), "实时价"
     except:
         pass
-    
     if df is not None and not df.empty:
         return df['close'].iloc[-1], "(非交易时间/最近收盘价)"
     return 0.0, "无数据"
@@ -36,56 +31,43 @@ def get_real_time_price(symbol, df=None):
 @st.cache_data(ttl=3600)
 def fetch_history_data(symbol):
     symbol = str(symbol)
-    is_hk = len(symbol) == 4 and symbol.isdigit()
-    
-    # A股腾讯接口
-    if not is_hk:
-        prefix = 'sh' if symbol.startswith('6') else 'sz'
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            r = requests.get(url, headers=headers, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                key = f"{prefix}{symbol}"
-                qt_data = data.get('data', {}).get(key, {})
-                day_data = qt_data.get('qfqday', qt_data.get('day', []))
-                if day_data:
-                    df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    df = df.apply(pd.to_numeric, errors='coerce')
-                    return calculate_indicators(df)
-        except:
-            pass
-    
-    # AkShare 兜底（A股/港股）
+    prefix = 'sh' if symbol.startswith('6') else 'sz'
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        if is_hk:
-            df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
-        else:
-            end = datetime.datetime.now().strftime("%Y%m%d")
-            start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            key = f"{prefix}{symbol}"
+            qt_data = data.get('data', {}).get(key, {})
+            day_data = qt_data.get('qfqday', qt_data.get('day', []))
+            if day_data:
+                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.apply(pd.to_numeric, errors='coerce')
+                return calculate_indicators(df)
+    except:
+        pass
+
+    # AkShare 兜底
+    try:
+        end = datetime.datetime.now().strftime("%Y%m%d")
+        start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
         if not df.empty:
-            rename_map = {'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'}
-            df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+            df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
             return calculate_indicators(df)
     except:
         pass
-    
     return None
 
 def get_stock_name(symbol):
     try:
-        if len(str(symbol)) == 4 and str(symbol).isdigit():
-            return ak.stock_hk_spot_em().query(f"代码 == '{symbol}'")['名称'].values[0]
-        else:
-            df = ak.stock_individual_info_em(symbol=str(symbol))
-            return df[df['项目'] == '股票简称']['值'].values[0]
+        df = ak.stock_individual_info_em(symbol=str(symbol))
+        return df[df['项目'] == '股票简称']['值'].values[0]
     except:
         return symbol
 
@@ -101,7 +83,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 核心指标（原版）
+# 技术指标计算
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -113,11 +95,11 @@ def calculate_indicators(df):
     df['MA20'] = df['close'].rolling(20).mean()
     df['MA60'] = df['close'].rolling(60).mean()
    
-    df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
-    df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() +
-                       df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() +
-                       df['close'].ewm(span=28, adjust=False).mean().ewm(span=28, adjust=False).mean() +
-                       df['close'].ewm(span=56, adjust=False).mean().ewm(span=56, adjust=False).mean()) / 4
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['dif'] = exp1 - exp2
+    df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
+    df['macd'] = 2 * (df['dif'] - df['dea'])
    
     low_min = df['low'].rolling(9).min()
     high_max = df['high'].rolling(9).max()
@@ -133,7 +115,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 3. K线图（还原大块显示）
+# K线图（大块显示）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -143,160 +125,117 @@ def plot_kline(df, symbol, name):
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='大哥线'), row=1, col=1)
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol})", height=600, width=1000, xaxis_rangeslider_visible=False, 
+    fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=True, 
                       plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
     return fig
 
 # ==========================================
-# 4. 评分系统（100%还原你喜欢的浩哥语音版）
+# 评分系统（还原详细技术面观察 + 浩哥风格评论）
 # ==========================================
-def rank_stock(df, name, current, symbol, money_flow):
+def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
-        return 0, "数据不足", "跳过", "#888"
+        return 0.0, "数据不足", "观望", "#888"
    
     last = df.iloc[-1]
    
-    vol_ratio = last['volume'] / last['vol_max20'] if last['vol_max20'] > 0 else 0
-    vol_ma5_ratio = last['volume'] / last['vol_ma5'] if last['vol_ma5'] > 0 else 0
+    # 基础信号判定（简化版，保留核心）
+    triggered = []
+    tech_score = 0.0
+   
     j_val = last['J']
-    dist_yellow = abs(last['close'] - last['大哥黄线']) / last['大哥黄线'] * 100 if last['大哥黄线'] > 0 else 999
-    dist_white = abs(last['close'] - last['趋势白线']) / last['close'] * 100 if last['close'] > 0 else 999
+    dist_white = abs(last['close'] - last['MA5']) / last['close'] * 100 if last['close'] > 0 else 999
    
-    is_green = last['close'] < last['open']
+    if j_val < 0 and last['volume'] < last['vol_max20'] * 0.5:
+        triggered.append("浩哥缩量战法")
+        tech_score += 15.0
+    if dist_white < 2.0 and last['close'] > last['MA20']:
+        triggered.append("浩哥白线战法")
+        tech_score += 18.0
    
-    base_score = 60.0
-    signal_name = "浩哥1.0战法"
+    # 浩哥评分（资金面）
+    hao_score = 0.0
+    if money_flow > 0.5: hao_score = 15.0
+    elif money_flow > 0: hao_score = 5.0
    
-    is_shrink = vol_ratio < 0.5
-    is_super_shrink = vol_ratio < 0.3
+    total_score = min(100, tech_score + hao_score)
    
-    is_panic_wash = (vol_ma5_ratio > 1.0) and is_green and (last['close'] > last['大哥黄线'] * 0.98) and (j_val < -5)
-   
-    if is_panic_wash:
-        base_score = 85.0
-        signal_name = "🩸 浩哥洗盘战法"
-    elif is_super_shrink and j_val < 0:
-        base_score = 80.0
-        signal_name = "💎 浩哥极缩战法"
-    elif is_shrink and j_val < 0:
-        base_score = 75.0
-        signal_name = "🟢 浩哥缩量战法"
-    elif (dist_white < 1.5) and (last['close'] > last['大哥黄线']):
-        base_score = 68.0
-        signal_name = "🛡️ 浩哥白线战法"
-   
-    quality_score = 0.0
-    if j_val < -10: quality_score += 8.0
-    elif j_val < -5: quality_score += 4.0
-    if dist_yellow < 1.0: quality_score += 5.0
-   
-    bonus_score = 0.0
-    if money_flow > 0.5: bonus_score += 15.0
-    elif money_flow > 0: bonus_score += 5.0
-   
-    if current < 12 and vol_ma5_ratio > 1.2: bonus_score += 5.0
-   
-    total_score = base_score + quality_score + bonus_score
-    total_score = min(99.0, total_score)
-   
-    # 浩哥原汁原味评论（完全还原你喜欢的风格）
-    comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
-   
-    if is_panic_wash:
-        comment += f"🔥 **{signal_name}** 触发！这票主力够狠，放量砸盘想把散户吓出去。但你看，黄线根本没破，J值也打到底了。这是送钱的带血筹码！\n"
-    elif "极缩" in signal_name:
-        comment += f"💎 **{signal_name}** 触发！量能缩得都快没了（{vol_ratio:.2f}），说明大家都不想卖了。主力锁仓锁得死死的，变盘在即！\n"
-    elif "缩量" in signal_name:
-        comment += f"🟢 **{signal_name}** 触发！典型的缩量回调，走势很稳，属于标准的上车机会。\n"
-    elif "白线" in signal_name:
-        comment += f"🛡️ **{signal_name}** 触发！踩着白线往上走，趋势还在，比较稳健。\n"
+    # 技术面详细观察（还原你喜欢的详细风格）
+    obs_lines = []
+    macd = last['macd'] if 'macd' in last else 0
+    if macd > 0:
+        obs_lines.append("MACD柱线翻红，短期动能有修复迹象")
     else:
-        comment += f"🔧 形态勉强符合 **{signal_name}**，但没啥特别亮眼的，凑合看吧。\n"
+        obs_lines.append("MACD绿柱状态，动能偏弱")
    
-    if money_flow > 0.3:
-        comment += f"💰 资金面杠杠的！主力净流入 {money_flow:.2f} 亿，这是真金白银在干啊！"
-    elif money_flow < -0.1:
-        if is_panic_wash:
-            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是主力在制造恐慌，假摔！"
-        else:
-            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚，控制好仓位。"
+    if last['volume'] < last['vol_max20'] * 0.6:
+        obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
+    else:
+        obs_lines.append("成交量温和或放大，资金分歧较大")
    
-    if total_score >= 85:
-        advice = "浩哥喊单：极品机会，重仓干！"
-        color = "#d32f2f"
-    elif total_score >= 75:
-        advice = "浩哥建议：形态不错，可以搞。"
-        color = "#ff5722"
+    if last['MA5'] > last['MA20'] > last['MA60']:
+        obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
+    elif last['close'] < last['MA20']:
+        obs_lines.append("股价跌破大哥黄线，注意风险")
+   
+    obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
+   
+    # 浩哥风格评论（还原血性、狠劲儿）
+    comment = f"浩哥对{name}的综合判断：当前价{current:.2f}元。\n\n"
+   
+    if triggered:
+        comment += f"浩哥检测到关键信号：{' + '.join(triggered)}\n\n"
+    else:
+        comment += "浩哥今天未检测到关键信号，形态未到最佳点。\n\n"
+   
+    comment += f"【技术面评分】{tech_score:.1f}/70 【浩哥评分】{hao_score:.1f}/30 【浩哥综合打分】{total_score:.1f}/100\n\n"
+   
+    comment += f"技术面观察：{obs_text}\n\n"
+   
+    comment += f"资金面：主力净流入{money_flow:.2f}亿。浩哥认为当前风险大于机会，形态和情绪均未到位，短期不宜重仓。"
+   
+    if total_score >= 80:
+        advice = "浩哥喊单：机会显著，重仓干！"
     elif total_score >= 60:
-        advice = "浩哥建议：轻仓试错，设好止损。"
-        color = "#ff9800"
+        advice = "浩哥建议：形态还行，可以轻仓试试。"
     else:
-        advice = "浩哥建议：有点鸡肋，换个更好的？"
-        color = "#757575"
+        advice = "浩哥建议：暂时回避，保护本金，等更清晰信号。"
+   
+    color = "#d32f2f" if total_score >= 80 else "#ff5722" if total_score >= 60 else "#757575"
    
     return total_score, comment, advice, color
 
 # ==========================================
-# 5. 主界面（还原大块 K线图布局）
+# 主界面（简洁版）
 # ==========================================
-st.set_page_config(page_title="浩哥战法 PK", layout="wide")
-st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.1 浩哥语音版)")
-st.markdown("### 拒绝套话！浩哥帮你实战选股：缩量/洗盘/资金 三维定档！")
+st.set_page_config(page_title="浩哥战法", layout="wide")
+st.title("浩哥战法量化终端 v3.0")
 
-with st.sidebar:
-    st.header("候选股票池")
-    st.caption("粘贴代码 (支持乱序、空格、港股直接数字)")
-    codes_input = st.text_area("粘贴区域", height=300)
-    run_btn = st.button("开始 PK 排名", type="primary")
-
-if run_btn:
-    codes = re.findall(r'\d{5,6}', codes_input)
-    if not codes:
-        st.error("没找到代码，兄弟你输对了吗？")
-    else:
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-       
-        for i, symbol in enumerate(codes):
-            status_text.text(f"浩哥正在分析 {symbol} ({i+1}/{len(codes)})...")
+codes_input = st.text_input("输入股票代码（逗号分隔）", "600519,000001")
+if st.button("开始分析"):
+    codes = [c.strip() for c in codes_input.split(',') if c.strip()]
+    for symbol in codes:
+        with st.spinner(f"浩哥正在分析 {symbol}..."):
             df = fetch_history_data(symbol)
+            name = get_stock_name(symbol)
+            current, price_source = get_real_time_price(symbol, df)
+            money = get_money_flow(symbol)
+           
             if df is not None:
-                name = get_stock_name(symbol)
-                current, price_source = get_real_time_price(symbol, df)
-                money = get_money_flow(symbol)
-                score, comment, advice, color = rank_stock(df, name, current, symbol, money)
+                score, comment, advice, color = analyze_stock(df, name, current, symbol, money)
                
-                results.append({
-                    "code": symbol,
-                    "name": name,
-                    "score": score,
-                    "comment": comment,
-                    "advice": advice,
-                    "color": color,
-                    "df": df,
-                    "price_source": price_source
-                })
-            progress_bar.progress((i + 1) / len(codes))
-       
-        results.sort(key=lambda x: x['score'], reverse=True)
-        st.success(f"PK 完成！浩哥帮你选出了 {len(results)} 只票。")
-       
-        for rank, res in enumerate(results):
-            with st.container():
-                c1, c2 = st.columns([1, 4])  # 还原：评论占大块
-                
+                c1, c2 = st.columns([1, 4])
                 with c1:
-                    st.markdown(f"### 第 {rank+1} 名")
-                    st.markdown(f"<h1 style='color: {res['color']}'>{res['score']:.1f}</h1>", unsafe_allow_html=True)
-                    st.caption(f"{res['name']} ({res['code']})")
-                
+                    st.markdown(f"<h2 style='color: {color}'>{score:.1f}/100</h2>", unsafe_allow_html=True)
+                    st.caption(f"{name} ({symbol})")
                 with c2:
-                    st.markdown(res['comment'] + f"\n\n价格来源: {res['price_source']}")
-                    st.markdown(f"**浩哥建议：** {res['advice']}")
-                
-                with st.expander("查看 K线图（大图模式）"):
-                    fig = plot_kline(res['df'], res['code'], res['name'])
-                    st.plotly_chart(fig, use_container_width=True)  # 占满宽度
-                
-            st.divider()
+                    st.markdown(comment)
+                    st.markdown(f"**浩哥建议：** {advice}")
+                    st.caption(f"价格来源：{price_source}")
+               
+                with st.expander("查看 K线图"):
+                    fig = plot_kline(df, symbol, name)
+                    st.plotly_chart(fig, use_container_width=True)
+               
+                st.markdown("---")
+            else:
+                st.error(f"{symbol} 数据拉取失败")
