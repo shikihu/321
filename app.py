@@ -10,11 +10,10 @@ import re
 import time
 
 # ==========================================
-# 1. 基础数据服务 (修复网络报错 + 增加重试)
+# 1. 基础服务 (带重试 + 防崩)
 # ==========================================
 @st.cache_data(ttl=10)
 def get_real_time_price(symbol, df=None):
-    # 强制转为字符串，防止报错
     symbol = str(symbol).strip()
     if symbol.startswith(('60', '68')): prefix = 'sh'
     elif symbol.startswith(('00', '30')): prefix = 'sz'
@@ -42,7 +41,7 @@ def fetch_history_data(symbol):
     elif symbol.startswith(('00', '30')): prefix = 'sz'
     else: prefix = 'sz'
 
-    # 方案A: 腾讯接口 (修复 ror_ 报错的关键点在于 calculate_indicators)
+    # 方案A: 腾讯
     try:
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -58,15 +57,13 @@ def fetch_history_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
-                # 过滤掉空数据
                 df.dropna(how='any', inplace=True)
                 return calculate_indicators(df)
-    except Exception as e:
-        # 默默跳过，不弹红框
+    except:
         pass
 
-    # 方案B: AkShare (增加重试机制，防止 RemoteDisconnected)
-    for _ in range(2): # 失败重试2次
+    # 方案B: AkShare (重试机制)
+    for _ in range(2):
         try:
             end = datetime.datetime.now().strftime("%Y%m%d")
             start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
@@ -78,7 +75,7 @@ def fetch_history_data(symbol):
                 df.set_index('date', inplace=True)
                 return calculate_indicators(df)
         except:
-            time.sleep(0.5) # 歇半秒再试
+            time.sleep(0.5)
             continue
             
     return None
@@ -102,7 +99,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 核心指标 (【重点修复】ror_ 报错)
+# 2. 核心指标 (【仅修复报错，逻辑不变】)
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20: return df
@@ -128,7 +125,7 @@ def calculate_indicators(df):
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
     
-    # RSI (如果你之前报错 ror_，很可能是因为这里没加括号，或者其他地方的位运算)
+    # RSI (防止计算缺失)
     delta = df['close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
@@ -145,29 +142,24 @@ def calculate_indicators(df):
     df.fillna(method='bfill', inplace=True)
     df.fillna(method='ffill', inplace=True)
     
-    # 【修复关键】所有涉及 | (或) 运算的地方，必须加括号 ()
-    # 比如: (df['J'] < 13) | (df['RSI'] < 18)
-    
     return df
 
 # ==========================================
-# 3. 评分系统 (保留浩哥语音逻辑)
+# 3. 评分系统 (浩哥战法 + 洗盘逻辑)
 # ==========================================
 def rank_stock(df, name, current, symbol, money_flow):
-    # 防御性判断
+    # 防御
     if df is None or len(df) < 20: 
         return 0, "数据不足", "跳过", "#888"
     
     last = df.iloc[-1]
     
-    # --- 变量准备 ---
-    # 容错处理：分母为0的情况
+    # 变量准备
     vol_ratio = last['volume'] / last['vol_max20'] if last['vol_max20'] > 0 else 0
     vol_ma5_ratio = last['volume'] / last['vol_ma5'] if last['vol_ma5'] > 0 else 0
-    
     j_val = last['J']
     
-    # 容错：防止黄线是 NaN
+    # 容错：防止NaN
     yellow_line = last['大哥黄线'] if not pd.isna(last['大哥黄线']) else last['MA20']
     white_line = last['趋势白线'] if not pd.isna(last['趋势白线']) else last['MA5']
     
@@ -185,8 +177,7 @@ def rank_stock(df, name, current, symbol, money_flow):
     is_shrink = vol_ratio < 0.5
     is_super_shrink = vol_ratio < 0.3
     
-    # 2. 洗盘逻辑 (蜜雪集团模式：放量+绿柱+不破黄线+超卖)
-    # 【修复重点】这里必须加括号，防止语法错误
+    # 2. 洗盘逻辑 (【修复】加括号防止 ror_ 报错)
     is_panic_wash = ((vol_ma5_ratio > 1.0) and is_green and (last['close'] > yellow_line) and (j_val < -5))
     
     # --- 定档 ---
@@ -208,13 +199,12 @@ def rank_stock(df, name, current, symbol, money_flow):
     if j_val < -10: quality_score += 8.0
     elif j_val < -5: quality_score += 4.0
         
-    if dist_yellow < 1.0: quality_score += 5.0 # 精准回踩
+    if dist_yellow < 1.0: quality_score += 5.0 
 
     # --- 资金面修正 ---
     bonus_score = 0.0
     if money_flow > 0.5: bonus_score += 15.0
     elif money_flow > 0: bonus_score += 5.0
-    # 注意：流出不扣分
     
     # 低价股活跃
     if current < 12 and vol_ma5_ratio > 1.2: bonus_score += 5.0
@@ -223,41 +213,33 @@ def rank_stock(df, name, current, symbol, money_flow):
     total_score = base_score + quality_score + bonus_score
     total_score = min(99.0, total_score)
     
-    # --- 生成评论 (保留浩哥原味) ---
-    comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
+    # --- 生成评论 (浩哥语气 + st.info 蓝色背景专用格式) ---
+    # 这里我们只生成文本内容，颜色框在下方主界面控制
+    comment = f"**定性：** {signal_name}\n"
     
     if is_panic_wash:
-        comment += f"🔥 **{signal_name}** 触发！这票主力够狠，放量砸盘想把散户吓出去。但你看，黄线根本没破，J值也打到底了。这是送钱的带血筹码！\n"
+        comment += "🔥 **核心逻辑：** 主力放量洗盘，黄线未破，带血筹码！\n"
     elif "极缩" in signal_name:
-        comment += f"💎 **{signal_name}** 触发！量能缩得都快没了（{vol_ratio:.2f}），说明大家都不想卖了。主力锁仓锁得死死的，变盘在即！\n"
+        comment += f"💎 **核心逻辑：** 窒息缩量（{vol_ratio:.2f}），主力锁仓。\n"
     elif "缩量" in signal_name:
-        comment += f"🟢 **{signal_name}** 触发！典型的缩量回调，走势很稳，属于标准的上车机会。\n"
-    elif "白线" in signal_name:
-        comment += f"🛡️ **{signal_name}** 触发！踩着白线往上走，趋势还在，比较稳健。\n"
-    else:
-        comment += f"🔧 形态勉强符合 **{signal_name}**，但没啥特别亮眼的，凑合看吧。\n"
-
-    # 资金点评
-    if money_flow > 0.3:
-        comment += f"💰 资金面杠杠的！主力净流入 {money_flow:.2f} 亿，这是真金白银在干啊！"
-    elif money_flow < -0.1:
-        if is_panic_wash:
-            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是主力在制造恐慌，假摔！"
-        else:
-            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚，控制好仓位。"
+        comment += "🟢 **核心逻辑：** 标准缩量回调，稳健。\n"
+    
+    comment += f"💰 **资金：** {'🟥 流入' if money_flow > 0 else '🟩 流出'} {abs(money_flow):.2f} 亿"
+    if money_flow < 0 and is_panic_wash:
+        comment += " (洗盘流出，不扣分)"
     
     # 建议与颜色
     if total_score >= 85:
-        advice = "浩哥喊单：极品机会，重仓干！"
+        advice = "极品！重仓干！"
         color = "#d32f2f" # 深红
     elif total_score >= 75:
-        advice = "浩哥建议：形态不错，可以搞。"
+        advice = "优质！可以搞。"
         color = "#ff5722" # 橙红
     elif total_score >= 60:
-        advice = "浩哥建议：轻仓试错，设好止损。"
+        advice = "轻仓试错。"
         color = "#ff9800" # 橙
     else:
-        advice = "浩哥建议：有点鸡肋，换个更好的？"
+        advice = "鸡肋，换票。"
         color = "#757575" # 灰
         
     return total_score, comment, advice, color
@@ -281,10 +263,10 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 5. 主界面
+# 5. 主界面 (【重点修复】恢复 v6.0 的 UI 布局)
 # ==========================================
 st.set_page_config(page_title="浩哥战法 PK", layout="wide")
-st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.2 修复版)")
+st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.3 UI修复版)")
 st.markdown("### 浩哥语音版：缩量/洗盘/资金 三维定档！")
 
 with st.sidebar:
@@ -295,10 +277,10 @@ with st.sidebar:
 
 if run_btn:
     codes = re.findall(r'\d{6}', codes_input)
-    codes = list(set(codes)) # 去重
+    codes = list(set(codes)) 
     
     if not codes:
-        st.error("没找到代码，兄弟你输对了吗？")
+        st.error("没找到代码")
     else:
         results = []
         progress_bar = st.progress(0)
@@ -307,7 +289,7 @@ if run_btn:
         for i, symbol in enumerate(codes):
             status_text.text(f"浩哥正在分析 {symbol} ({i+1}/{len(codes)})...")
             
-            # 获取数据 (已修复网络报错)
+            # 数据获取 (含重试)
             df = fetch_history_data(symbol)
             
             if df is not None:
@@ -315,7 +297,7 @@ if run_btn:
                 current = get_real_time_price(symbol, df)
                 money = get_money_flow(symbol)
                 
-                # 评分 (已修复语法错误)
+                # 评分 (含语法修复)
                 score, comment, advice, color = rank_stock(df, name, current, symbol, money)
                 
                 results.append({
@@ -325,15 +307,16 @@ if run_btn:
             
             progress_bar.progress((i + 1) / len(codes))
         
-        # 结果处理
         if not results:
-            st.error("所有股票数据拉取失败，可能是网络问题。")
+            st.error("分析失败，请检查网络。")
         else:
             results.sort(key=lambda x: x['score'], reverse=True)
+            # 使用 st.success 恢复绿色顶栏
             st.success(f"PK 完成！浩哥帮你选出了 {len(results)} 只票。")
             
             for rank, res in enumerate(results):
                 with st.container():
+                    # 恢复 v6.0 的列比例 [1.2, 3.5, 1.5]
                     c1, c2, c3 = st.columns([1.2, 3.5, 1.5]) 
                     
                     with c1:
@@ -342,7 +325,8 @@ if run_btn:
                         st.caption(f"{res['name']} ({res['code']})")
                     
                     with c2:
-                        st.markdown(res['comment'])
+                        # 【重点】恢复 st.info 蓝色背景框！
+                        st.info(res['comment'])
                     
                     with c3:
                         st.markdown(f"#### {res['advice']}")
