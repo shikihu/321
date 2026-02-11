@@ -98,7 +98,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 技术指标计算（已修正趋势白线 & 大哥黄线）
+# 2. 技术指标计算（严格按照你的公式）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -111,7 +111,7 @@ def calculate_indicators(df):
     df['MA20'] = df['close'].rolling(20, min_periods=1).mean()
     df['MA60'] = df['close'].rolling(60, min_periods=1).mean()
    
-    # 趋势白线: EMA(EMA(C,9),11)
+    # 趋势白线: EMA(EMA(CLOSE,9),11)
     ema9 = df['close'].ewm(span=9, adjust=False).mean()
     df['趋势白线'] = ema9.ewm(span=11, adjust=False).mean()
     
@@ -209,7 +209,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
    
-    # 浩哥风格评论（详细、专业）
+    # 浩哥风格评论
     comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
    
     if triggered:
