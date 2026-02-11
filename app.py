@@ -7,394 +7,359 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
 import re
+import time
 
 # ==========================================
-# 1. 数据服务（优先AkShare + 详细日志 + 容错）
+# 1. 基础服务 (加强重试与防崩)
 # ==========================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=10)
 def get_real_time_price(symbol, df=None):
-    symbol = str(symbol).strip()
-    prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
-    if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    if str(symbol).startswith(('60', '68')): prefix = 'sh'
+    elif str(symbol).startswith(('00', '30')): prefix = 'sz'
+    else: prefix = 'sz'
+    
+    headers = {'User-Agent': 'Mozilla/5.0'} 
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=2)
         if 'var hq_str_' in r.text:
             parts = r.text.split('"')[1].split(',')
-            if len(parts) > 3 and float(parts[3]) > 0:
-                return float(parts[3]), "实时价"
-    except Exception as e:
-        st.warning(f"实时价失败 ({symbol}): {str(e)[:80]}...")
+            if len(parts) > 3:
+                return float(parts[3])
+    except:
+        pass
+    
     if df is not None and not df.empty:
-        return df['close'].iloc[-1], "(盘后/最近收盘价)"
-    return 0.0, "无数据"
+        return df['close'].iloc[-1]
+    return 0.0
 
 @st.cache_data(ttl=3600)
 def fetch_history_data(symbol):
     symbol = str(symbol).strip()
-    st.write(f"开始拉取 {symbol} 历史数据...")
-    
-    # 优先 AkShare
+    if symbol.startswith(('60', '68')): prefix = 'sh'
+    elif symbol.startswith(('00', '30')): prefix = 'sz'
+    else: prefix = 'sz'
+
+    # 方案A: 腾讯接口 (速度快，优先)
     try:
-        end = datetime.datetime.now().strftime("%Y%m%d")
-        start = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        if not df.empty and len(df) > 50:
-            df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            st.write(f"{symbol} AkShare 成功，拉到 {len(df)} 条数据")
-            return calculate_indicators(df)
-        else:
-            st.warning(f"{symbol} AkShare 数据少或空 ({len(df) if df is not None else 'None'}条)")
-    except Exception as e:
-        st.error(f"{symbol} AkShare 异常: {str(e)[:150]}...")
-    
-    # 腾讯备用
-    try:
-        prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=10)
-        st.write(f"{symbol} 腾讯接口状态码: {r.status_code}")
+        r = requests.get(url, headers=headers, timeout=5)
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
             qt_data = data.get('data', {}).get(key, {})
             day_data = qt_data.get('qfqday', qt_data.get('day', []))
+            
             if day_data:
                 df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
-                st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条数据")
+                # 腾讯数据偶尔会有空行，清理一下
+                df.dropna(how='any', inplace=True)
                 return calculate_indicators(df)
-        else:
-            st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
     except Exception as e:
-        st.error(f"{symbol} 腾讯异常: {str(e)[:150]}...")
+        # print(f"腾讯失败: {e}")
+        pass
+
+    # 方案B: AkShare (稳，但可能超时，增加重试)
+    try:
+        end = datetime.datetime.now().strftime("%Y%m%d")
+        start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
+        
+        # 尝试最多 2 次
+        for _ in range(2):
+            try:
+                df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
+                if not df.empty:
+                    df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
+                    df['date'] = pd.to_datetime(df['date'])
+                    df.set_index('date', inplace=True)
+                    return calculate_indicators(df)
+            except:
+                time.sleep(0.5)
+                continue
+    except:
+        pass
     
-    st.error(f"{symbol} 所有数据源失败，无法分析")
     return None
 
 def get_stock_name(symbol):
     try:
-        if len(str(symbol)) == 4 and str(symbol).isdigit():
-            return ak.stock_hk_spot_em().query(f"代码 == '{symbol}'")['名称'].values[0]
-        else:
-            df = ak.stock_individual_info_em(symbol=str(symbol))
-            return df[df['项目'] == '股票简称']['值'].values[0]
+        # 优先尝试从新浪接口快速获取名字，AkShare太慢
+        prefix = 'sh' if str(symbol).startswith(('60', '68')) else 'sz'
+        url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
+        r = requests.get(url, timeout=2)
+        if 'var hq_str_' in r.text:
+            parts = r.text.split('"')[1].split(',')
+            if len(parts) > 0:
+                return parts[0]
+        
+        # 兜底
+        df = ak.stock_individual_info_em(symbol=symbol)
+        return df[df['项目'] == '股票简称']['值'].values[0]
     except:
         return symbol
 
 @st.cache_data(ttl=1800)
 def get_money_flow(symbol):
     try:
-        market = "sh" if str(symbol).startswith('6') else "sz"
-        flow = ak.stock_individual_fund_flow(stock=str(symbol), market=market)
+        market = "sh" if str(symbol).startswith(('60', '68')) else "sz"
+        flow = ak.stock_individual_fund_flow(stock=symbol, market=market)
         if not flow.empty:
-            return flow.iloc[0]['主力净流入-净额'] / 100000000
+            return flow.iloc[0]['主力净流入-净额'] / 100000000 
     except:
         pass
     return 0.0
 
 # ==========================================
-# 2. 技术指标计算（修复位运算bug）
+# 2. 核心指标 (修复了 TypeError)
 # ==========================================
 def calculate_indicators(df):
-    if df is None or len(df) < 5:
-        return df
-   
+    if df is None or len(df) < 20: return df
     df = df.copy()
-   
-    df['MA5'] = df['close'].rolling(5, min_periods=1).mean()
-    df['MA20'] = df['close'].rolling(20, min_periods=1).mean()
-    df['MA60'] = df['close'].rolling(60, min_periods=1).mean()
-   
-    ema9 = df['close'].ewm(span=9, adjust=False).mean()
-    df['趋势白线'] = ema9.ewm(span=11, adjust=False).mean()
     
-    ema7_inner = df['close'].ewm(span=7, adjust=False).mean()
-    ema7_outer = ema7_inner.ewm(span=7, adjust=False).mean()
+    # 均线
+    df['MA5'] = df['close'].rolling(5).mean()
+    df['MA20'] = df['close'].rolling(20).mean() # 黄线
+    df['MA60'] = df['close'].rolling(60).mean()
     
-    ema14_inner = df['close'].ewm(span=14, adjust=False).mean()
-    ema14_outer = ema14_inner.ewm(span=14, adjust=False).mean()
-    
-    ema28_inner = df['close'].ewm(span=28, adjust=False).mean()
-    ema28_outer = ema28_inner.ewm(span=28, adjust=False).mean()
-    
-    ema56_inner = df['close'].ewm(span=56, adjust=False).mean()
-    ema56_outer = ema56_inner.ewm(span=56, adjust=False).mean()
-    
-    df['大哥黄线'] = (ema7_outer + ema14_outer + ema28_outer + ema56_outer) / 4
-    
-    low_min = df['low'].rolling(9, min_periods=1).min()
-    high_max = df['high'].rolling(9, min_periods=1).max()
+    # 浩哥专用线
+    df['趋势白线'] = df['close'].ewm(span=9, adjust=False).mean().ewm(span=11, adjust=False).mean()
+    df['大哥黄线'] = (df['close'].ewm(span=7, adjust=False).mean().ewm(span=7, adjust=False).mean() + 
+                       df['close'].ewm(span=14, adjust=False).mean().ewm(span=14, adjust=False).mean() + 
+                       df['close'].ewm(span=28, adjust=False).mean().ewm(span=28, adjust=False).mean() + 
+                       df['close'].ewm(span=56, adjust=False).mean().ewm(span=56, adjust=False).mean()) / 4
+
+    # KDJ
+    low_min = df['low'].rolling(9).min()
+    high_max = df['high'].rolling(9).max()
     rsv = (df['close'] - low_min) / (high_max - low_min) * 100
     df['K'] = rsv.ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
     
+    # RSI (增加 RSI 计算，防止 KeyError)
     delta = df['close'].diff()
     up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
+    down = -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=13, adjust=False).mean()
     ema_down = down.ewm(com=13, adjust=False).mean()
     rs = ema_up / ema_down
     df['RSI'] = 100 - (100 / (1 + rs))
+
+    # 量能
+    df['vol_max20'] = df['volume'].rolling(20).max()
+    df['vol_ma5'] = df['volume'].rolling(5).mean()
     
-    df['vol_max20'] = df['volume'].rolling(20, min_periods=1).max()
-    df['vol_ma5'] = df['volume'].rolling(5, min_periods=1).mean()
-    df['vol_max50'] = df['volume'].rolling(50, min_periods=1).max()
-    df['vol_max30'] = df['volume'].rolling(30, min_periods=1).max()
+    # 填充空值
+    df.fillna(method='bfill', inplace=True)
+    df.fillna(method='ffill', inplace=True)
     
-    df['缩量'] = (df['volume'] < df['vol_max20'] * 0.416) | (df['volume'] < df['vol_max50'] / 3)
-    df['回踩缩量'] = (df['volume'] < df['vol_max20'] * 0.45) | (df['volume'] < df['vol_max50'] / 3)
-    df['适当缩量'] = (df['volume'] < df['vol_max20'] * 0.618) | (df['volume'] < df['vol_max50'] / 3)
-    df['超缩量'] = (df['volume'] < df['vol_max30'] / 4) | (df['volume'] < df['vol_max50'] / 6)
-    
-    df['当日振幅'] = (df['high'] - df['low']) / df['low'] * 100
-    df['当日涨跌幅'] = (df['close'] - df.shift(1)['close']) / df.shift(1)['close'] * 100
-    df['收阳线'] = df['close'] > df['open']
-    
-    df['近期振幅'] = (df['high'].rolling(20).max() - df['low'].rolling(20).min()) / df['low'].rolling(20).min() * 100
-    df['远期振幅'] = (df['high'].rolling(50).max() - df['low'].rolling(50).min()) / df['low'].rolling(50).min() * 100
-    
-    # 修复位运算bug：加完整括号 + astype(bool) 兜底
-    df['做上涨趋势'] = (
-        (df['趋势白线'] >= df['大哥黄线'] * 0.999).astype(bool) & 
-        (
-            (df['close'] >= df['大哥黄线']).astype(bool) | 
-            ((df['close'] > df['大哥黄线'] * 0.975) & df['收阳线']).astype(bool)
-        )
-    ).astype(bool)
-    
-    df['距离白线'] = abs(df['close'] - df['趋势白线']) / df['close'] * 100
-    df['回踩白线'] = (
-        ((df['close'] >= df['趋势白线']).astype(bool) & (df['距离白线'] <= 2)) | 
-        ((df['close'] < df['趋势白线']).astype(bool) & (df['距离白线'] < 0.8))
-    ).astype(bool)
-    
-    df['距离黄线'] = abs(df['close'] - df['大哥黄线']) / df['大哥黄线'] * 100
-    df['回踩黄线'] = (
-        ((df['close'] >= df['大哥黄线']).astype(bool) & 
-         ((df['距离黄线'] <= 1.5) | ((df['距离黄线'] <= 2) & (df['当日涨跌幅'] < 1)))) | 
-        ((df['close'] < df['大哥黄线']).astype(bool) & (df['距离黄线'] <= 0.8))
-    ).astype(bool)
-    
-    # 信号判断（所有7种战法，格式统一）
-    df['浩哥缩量战法'] = (
-        df['做上涨趋势'] & 
-        (df['J'] < 14) & 
-        df['缩量'] & 
-        (df['当日振幅'] < 8) & 
-        ((df['当日涨跌幅'] < 2.5) | (df['收阳线'] & (df['当日涨跌幅'] < 4)))
-    ).astype(bool)
-    
-    df['浩哥极缩战法'] = (
-        df['做上涨趋势'] & 
-        (df['J'] < 14) & 
-        df['超缩量'] & 
-        (df['当日振幅'] < 8)
-    ).astype(bool)
-    
-    df['浩哥拐头战法'] = (
-        df['做上涨趋势'] & 
-        (df['RSI'] - 15 >= df.shift(1)['RSI']) & 
-        (df.shift(1)['RSI'] < 20) & 
-        (df['当日振幅'] < 8) & 
-        df['缩量']
-    ).astype(bool)
-    
-    df['浩哥白线战法'] = (
-        df['做上涨趋势'] & 
-        df['回踩白线'] & 
-        df['回踩缩量'] & 
-        (df['J'] < 30) & 
-        (df['当日振幅'] < 8.5)
-    ).astype(bool)
-    
-    df['浩哥超级战法'] = (
-        (df['close'] > df['MA20'] * 1.05) & 
-        df['适当缩量'] & 
-        (df['J'] < 35) & 
-        df['回踩白线']
-    ).astype(bool)
-    
-    df['浩哥黄线战法'] = (
-        df['回踩黄线'] & 
-        df['缩量'] & 
-        (df['大哥黄线'] >= df.shift(1)['大哥黄线'] * 0.997) & 
-        (df['MA60'] >= df.shift(1)['MA60']) & 
-        (df['近期振幅'] >= 11.9) & 
-        (df['远期振幅'] >= 19.5) & 
-        (df['J'] < 13 | df['RSI'] < 18)
-    ).astype(bool)
-    
-    df['浩哥1.0战法'] = (
-        (df['趋势白线'] > df['大哥黄线']) & 
-        (df['J'] < 13) & 
-        df['适当缩量'] & 
-        (df['当日振幅'] < 8)
-    ).astype(bool)
-    
-    df = df.ffill().bfill()
     return df
 
 # ==========================================
-# 3. K线图
+# 3. 评分系统 (洗盘逻辑 + 浩哥语录)
+# ==========================================
+def rank_stock(df, name, current, symbol, money_flow):
+    # 防御性编程：确保 df 有数据且指标已计算
+    if df is None or len(df) < 20 or 'J' not in df.columns: 
+        return 0, "数据不足或计算失败", "跳过", "#888"
+    
+    last = df.iloc[-1]
+    
+    # --- 变量准备 ---
+    vol_ratio = last['volume'] / last['vol_max20'] if last['vol_max20'] > 0 else 0
+    vol_ma5_ratio = last['volume'] / last['vol_ma5'] if last['vol_ma5'] > 0 else 0
+    j_val = last['J']
+    
+    # 容错：防止大哥黄线是 NaN
+    yellow_line = last['大哥黄线'] if not np.isnan(last['大哥黄线']) else last['MA20']
+    white_line = last['趋势白线'] if not np.isnan(last['趋势白线']) else last['MA5']
+    
+    dist_yellow = abs(last['close'] - yellow_line) / yellow_line * 100
+    dist_white = abs(last['close'] - white_line) / last['close'] * 100
+    
+    is_green = last['close'] < last['open'] # 收阴
+    
+    base_score = 60.0 
+    signal_name = "浩哥1.0战法" # 默认名
+    key_feature = "普通回踩"
+    
+    # --- 判定模式 ---
+
+    # 1. 缩量逻辑
+    is_shrink = vol_ratio < 0.5
+    is_super_shrink = vol_ratio < 0.3
+    
+    # 2. 洗盘逻辑 (蜜雪集团模式：放量+绿柱+不破黄线+超卖)
+    # 【修复重点】这里加了括号，防止位运算报错
+    is_panic_wash = (vol_ma5_ratio > 1.0) and is_green and (last['close'] > yellow_line) and (j_val < -5)
+    
+    # --- 定档 ---
+    if is_panic_wash:
+        base_score = 85.0
+        signal_name = "🩸 浩哥洗盘战法"
+        key_feature = "放量恐慌洗盘"
+    elif is_super_shrink and j_val < 0:
+        base_score = 80.0
+        signal_name = "💎 浩哥极缩战法"
+        key_feature = "极致窒息缩量"
+    elif is_shrink and j_val < 0:
+        base_score = 75.0
+        signal_name = "🟢 浩哥缩量战法"
+        key_feature = "标准缩量回调"
+    elif (dist_white < 1.5) and (last['close'] > yellow_line):
+        base_score = 68.0
+        signal_name = "🛡️ 浩哥白线战法"
+        key_feature = "回踩趋势白线"
+    
+    # --- 细节加分 ---
+    quality_score = 0.0
+    if j_val < -10: quality_score += 8.0
+    elif j_val < -5: quality_score += 4.0
+        
+    if dist_yellow < 1.0: quality_score += 5.0 # 精准回踩
+
+    # --- 资金面修正 ---
+    bonus_score = 0.0
+    if money_flow > 0.5: bonus_score += 15.0
+    elif money_flow > 0: bonus_score += 5.0
+    # 注意：流出不扣分
+    
+    # 低价股活跃
+    if current < 12 and vol_ma5_ratio > 1.2: bonus_score += 5.0
+
+    # --- 算总分 ---
+    total_score = base_score + quality_score + bonus_score
+    total_score = min(99.0, total_score)
+    
+    # --- 生成评论 ---
+    comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
+    
+    if is_panic_wash:
+        comment += f"🔥 **{signal_name}** 触发！主力够狠，放量砸盘吓唬人，但黄线没破，J值到底。这是带血的筹码！\n"
+    elif "极缩" in signal_name:
+        comment += f"💎 **{signal_name}** 触发！量能窒息（{vol_ratio:.2f}），主力锁仓，变盘在即！\n"
+    elif "缩量" in signal_name:
+        comment += f"🟢 **{signal_name}** 触发！标准缩量回调，稳健上车机会。\n"
+    elif "白线" in signal_name:
+        comment += f"🛡️ **{signal_name}** 触发！回踩趋势线，形态未坏。\n"
+    else:
+        comment += f"🔧 形态勉强符合 **{signal_name}**，亮点不多，凑合看。\n"
+
+    # 资金点评
+    if money_flow > 0.3:
+        comment += f"💰 资金面很硬！主力净流入 {money_flow:.2f} 亿，真金白银在干！"
+    elif money_flow < -0.1:
+        if is_panic_wash:
+            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是洗盘假象！"
+        else:
+            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚。"
+    
+    # 建议与颜色
+    if total_score >= 85:
+        advice = "浩哥喊单：极品机会，重仓干！"
+        color = "#d32f2f" # 深红
+    elif total_score >= 75:
+        advice = "浩哥建议：形态不错，可以搞。"
+        color = "#ff5722" # 橙红
+    elif total_score >= 60:
+        advice = "浩哥建议：轻仓试错，设好止损。"
+        color = "#ff9800" # 橙
+    else:
+        advice = "浩哥建议：有点鸡肋，换个票？"
+        color = "#757575" # 灰
+        
+    return total_score, comment, advice, color
+
+# ==========================================
+# 4. 绘图
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='趋势白线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
+    
+    # 安全绘图
+    if '趋势白线' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
+    if '大哥黄线' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥线'), row=1, col=1)
+        
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=True, 
-                      plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
+    fig.update_layout(title=f"{name} ({symbol})", height=500, xaxis_rangeslider_visible=False, plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
     return fig
 
 # ==========================================
-# 4. 评分系统（示例，完整版可继续扩展）
+# 5. 主界面
 # ==========================================
-def analyze_stock(df, name, current, symbol, money_flow):
-    if df is None or len(df) < 20:
-        return 0.0, f"浩哥看 {name} 数据不足，无法分析。", "浩哥建议：暂缓操作。"
-   
-    last = df.iloc[-1]
-   
-    triggered = []
-    tech_score = 0.0
-   
-    if last['浩哥缩量战法']:
-        triggered.append("浩哥缩量战法")
-        tech_score += 20.0
-    if last['浩哥极缩战法']:
-        triggered.append("浩哥极缩战法")
-        tech_score += 25.0
-    if last['浩哥拐头战法']:
-        triggered.append("浩哥拐头战法")
-        tech_score += 18.0
-    if last['浩哥白线战法']:
-        triggered.append("浩哥白线战法")
-        tech_score += 22.0
-    if last['浩哥超级战法']:
-        triggered.append("浩哥超级战法")
-        tech_score += 28.0
-    if last['浩哥黄线战法']:
-        triggered.append("浩哥黄线战法")
-        tech_score += 15.0
-    if last['浩哥1.0战法']:
-        triggered.append("浩哥1.0战法")
-        tech_score += 10.0
-    
-    hao_score = 0.0
-    if money_flow > 0.5: hao_score = 15.0
-    elif money_flow > 0: hao_score = 5.0
-   
-    total_score = min(100, tech_score + hao_score)
-   
-    # 详细技术面观察
-    obs_lines = []
-    macd = last['macd'] if 'macd' in last else 0
-    if macd > 0:
-        obs_lines.append("MACD柱线翻红，短期动能有修复迹象")
-    else:
-        obs_lines.append("MACD绿柱状态，动能偏弱")
-    
-    if last['volume'] < last['vol_max20'] * 0.6:
-        obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
-    else:
-        obs_lines.append("成交量温和或放大，资金分歧较大")
-    
-    if last['MA5'] > last['MA20'] > last['MA60']:
-        obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
-    elif last['close'] < last['MA20']:
-        obs_lines.append("股价跌破大哥黄线，注意风险")
-    
-    obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
-    
-    # 浩哥风格评论
-    comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
-    
-    if triggered:
-        comment += f"浩哥检测到关键信号：{' + '.join(triggered)}\n\n"
-    else:
-        comment += "浩哥今天未检测到关键信号，形态未到最佳点。\n\n"
-    
-    comment += f"【技术面评分】{tech_score:.1f}/70 【浩哥评分】{hao_score:.1f}/30 【浩哥综合打分】{total_score:.1f}/100\n\n"
-    
-    comment += f"技术面观察：{obs_text}\n\n"
-    
-    comment += f"资金面：主力净流入 {money_flow:.2f} 亿。浩哥认为当前风险大于机会，形态和情绪均未到位，短期不宜重仓。"
-    
-    if total_score >= 80:
-        advice = "浩哥喊单：机会显著，重仓干！"
-    elif total_score >= 60:
-        advice = "浩哥建议：形态还行，可以轻仓试试。"
-    else:
-        advice = "浩哥建议：暂时回避，保护本金，等更清晰信号。"
-    
-    return total_score, comment, advice
+st.set_page_config(page_title="浩哥战法 PK", layout="wide")
+st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.2 修复版)")
+st.markdown("### 浩哥语音版：缩量/洗盘/资金 三维定档！")
 
-# ==========================================
-# 主界面
-# ==========================================
-st.set_page_config(page_title="浩哥战法", layout="wide")
-st.title("浩哥战法量化终端 v3.0")
+with st.sidebar:
+    st.header("候选股票池")
+    st.caption("粘贴代码 (支持乱序、空格)")
+    codes_input = st.text_area("粘贴区域", height=300)
+    run_btn = st.button("开始 PK 排名", type="primary")
 
-codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多300只）", height=150)
-if st.button("开始分析"):
+if run_btn:
     codes = re.findall(r'\d{6}', codes_input)
-    codes = list(set(codes))[:300]
+    # 简单去重
+    codes = list(set(codes))
+    
     if not codes:
-        st.error("没找到有效代码")
+        st.error("没找到代码，兄弟你输对了吗？")
     else:
         results = []
-        progress = st.progress(0)
-        status = st.empty()
-       
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         for i, symbol in enumerate(codes):
-            status.text(f"分析中 {i+1}/{len(codes)}: {symbol}")
+            status_text.text(f"浩哥正在分析 {symbol} ({i+1}/{len(codes)})...")
+            
+            # 获取数据
             df = fetch_history_data(symbol)
+            
             if df is not None:
                 name = get_stock_name(symbol)
-                current, source = get_real_time_price(symbol, df)
+                current = get_real_time_price(symbol, df)
                 money = get_money_flow(symbol)
-                score, comment, advice = analyze_stock(df, name, current, symbol, money)
+                
+                # 评分
+                score, comment, advice, color = rank_stock(df, name, current, symbol, money)
+                
                 results.append({
-                    "rank": 0,
-                    "code": symbol,
-                    "name": name,
-                    "score": score,
-                    "comment": comment,
-                    "advice": advice,
-                    "df": df,
-                    "source": source
+                    "code": symbol, "name": name, "score": score, 
+                    "comment": comment, "advice": advice, "color": color, "df": df
                 })
-            progress.progress((i + 1) / len(codes))
-       
-        results.sort(key=lambda x: x['score'], reverse=True)
-        for i, res in enumerate(results):
-            res['rank'] = i + 1
-       
-        st.success(f"分析完成！共 {len(results)} 只票")
-       
-        for res in results:
-            c1, c2 = st.columns([1, 5])
-            with c1:
-                st.markdown(f"**第 {res['rank']} 名**")
-                st.metric("浩哥打分", f"{res['score']:.1f}/100")
-            with c2:
-                st.markdown(res['comment'])
-                st.markdown(f"**浩哥建议**：{res['advice']}")
-                st.caption(f"价格来源：{res['source']}")
             
-            with st.expander("K线图"):
-                fig = plot_kline(res['df'], res['code'], res['name'])
-                st.plotly_chart(fig, use_container_width=True)
+            progress_bar.progress((i + 1) / len(codes))
+        
+        if not results:
+            st.error("所有股票数据拉取失败，可能是网络问题，请稍后再试。")
+        else:
+            results.sort(key=lambda x: x['score'], reverse=True)
+            st.success(f"PK 完成！浩哥帮你选出了 {len(results)} 只票。")
             
-            st.markdown("---")
+            for rank, res in enumerate(results):
+                with st.container():
+                    c1, c2, c3 = st.columns([1.2, 3.5, 1.5]) 
+                    
+                    with c1:
+                        st.markdown(f"### 第 {rank+1} 名")
+                        st.markdown(f"<h1 style='color: {res['color']}'>{res['score']:.1f}</h1>", unsafe_allow_html=True)
+                        st.caption(f"{res['name']} ({res['code']})")
+                    
+                    with c2:
+                        st.markdown(res['comment'])
+                    
+                    with c3:
+                        st.markdown(f"#### {res['advice']}")
+                        with st.expander("K线图"):
+                            st.plotly_chart(plot_kline(res['df'], res['code'], res['name']), use_container_width=True)
+                    
+                st.divider()
