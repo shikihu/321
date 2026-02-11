@@ -9,14 +9,14 @@ import datetime
 import re
 
 # ==========================================
-# 数据服务（加强日志 + 容错）
+# 1. 数据服务（优先AkShare + 详细日志 + 容错）
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
     symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
     if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
         r = requests.get(url, headers=headers, timeout=5)
@@ -44,7 +44,7 @@ def fetch_history_data(symbol):
             df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
-            st.success(f"{symbol} AkShare 成功，拉到 {len(df)} 条数据")
+            st.write(f"{symbol} AkShare 成功，拉到 {len(df)} 条数据")
             return calculate_indicators(df)
         else:
             st.warning(f"{symbol} AkShare 数据少或空 ({len(df) if df is not None else 'None'}条)")
@@ -68,7 +68,7 @@ def fetch_history_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
-                st.success(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
+                st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条数据")
                 return calculate_indicators(df)
         else:
             st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
@@ -100,7 +100,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 技术指标计算（修复位运算bug）
+# 2. 技术指标计算（修复位运算bug）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -161,34 +161,83 @@ def calculate_indicators(df):
     df['近期振幅'] = (df['high'].rolling(20).max() - df['low'].rolling(20).min()) / df['low'].rolling(20).min() * 100
     df['远期振幅'] = (df['high'].rolling(50).max() - df['low'].rolling(50).min()) / df['low'].rolling(50).min() * 100
     
-    # 修复位运算bug：加括号，确保 bool 运算安全
+    # 修复位运算bug：加完整括号 + astype(bool) 兜底
     df['做上涨趋势'] = (
-        (df['趋势白线'] >= df['大哥黄线'] * 0.999) & 
-        ((df['close'] >= df['大哥黄线']) | ((df['close'] > df['大哥黄线'] * 0.975) & df['收阳线']))
-    )
+        (df['趋势白线'] >= df['大哥黄线'] * 0.999).astype(bool) & 
+        (
+            (df['close'] >= df['大哥黄线']).astype(bool) | 
+            ((df['close'] > df['大哥黄线'] * 0.975) & df['收阳线']).astype(bool)
+        )
+    ).astype(bool)
     
     df['距离白线'] = abs(df['close'] - df['趋势白线']) / df['close'] * 100
     df['回踩白线'] = (
-        (df['close'] >= df['趋势白线']) & (df['距离白线'] <= 2) | 
-        (df['close'] < df['趋势白线']) & (df['距离白线'] < 0.8)
-    )
+        ((df['close'] >= df['趋势白线']).astype(bool) & (df['距离白线'] <= 2)) | 
+        ((df['close'] < df['趋势白线']).astype(bool) & (df['距离白线'] < 0.8))
+    ).astype(bool)
     
     df['距离黄线'] = abs(df['close'] - df['大哥黄线']) / df['大哥黄线'] * 100
     df['回踩黄线'] = (
-        (df['close'] >= df['大哥黄线']) & ((df['距离黄线'] <= 1.5) | ((df['距离黄线'] <= 2) & (df['当日涨跌幅'] < 1))) | 
-        (df['close'] < df['大哥黄线']) & (df['距离黄线'] <= 0.8)
-    )
+        ((df['close'] >= df['大哥黄线']).astype(bool) & 
+         ((df['距离黄线'] <= 1.5) | ((df['距离黄线'] <= 2) & (df['当日涨跌幅'] < 1)))) | 
+        ((df['close'] < df['大哥黄线']).astype(bool) & (df['距离黄线'] <= 0.8))
+    ).astype(bool)
     
-    # 信号判断（示例，完整7种战法类似添加）
+    # 信号判断（所有7种战法，格式统一）
     df['浩哥缩量战法'] = (
         df['做上涨趋势'] & 
         (df['J'] < 14) & 
         df['缩量'] & 
         (df['当日振幅'] < 8) & 
-        (df['当日涨跌幅'] < 2.5 | (df['收阳线'] & (df['当日涨跌幅'] < 4)))
-    )
+        ((df['当日涨跌幅'] < 2.5) | (df['收阳线'] & (df['当日涨跌幅'] < 4)))
+    ).astype(bool)
     
-    # (其他战法类似添加...)
+    df['浩哥极缩战法'] = (
+        df['做上涨趋势'] & 
+        (df['J'] < 14) & 
+        df['超缩量'] & 
+        (df['当日振幅'] < 8)
+    ).astype(bool)
+    
+    df['浩哥拐头战法'] = (
+        df['做上涨趋势'] & 
+        (df['RSI'] - 15 >= df.shift(1)['RSI']) & 
+        (df.shift(1)['RSI'] < 20) & 
+        (df['当日振幅'] < 8) & 
+        df['缩量']
+    ).astype(bool)
+    
+    df['浩哥白线战法'] = (
+        df['做上涨趋势'] & 
+        df['回踩白线'] & 
+        df['回踩缩量'] & 
+        (df['J'] < 30) & 
+        (df['当日振幅'] < 8.5)
+    ).astype(bool)
+    
+    df['浩哥超级战法'] = (
+        (df['close'] > df['MA20'] * 1.05) & 
+        df['适当缩量'] & 
+        (df['J'] < 35) & 
+        df['回踩白线']
+    ).astype(bool)
+    
+    df['浩哥黄线战法'] = (
+        df['回踩黄线'] & 
+        df['缩量'] & 
+        (df['大哥黄线'] >= df.shift(1)['大哥黄线'] * 0.997) & 
+        (df['MA60'] >= df.shift(1)['MA60']) & 
+        (df['近期振幅'] >= 11.9) & 
+        (df['远期振幅'] >= 19.5) & 
+        (df['J'] < 13 | df['RSI'] < 18)
+    ).astype(bool)
+    
+    df['浩哥1.0战法'] = (
+        (df['趋势白线'] > df['大哥黄线']) & 
+        (df['J'] < 13) & 
+        df['适当缩量'] & 
+        (df['当日振幅'] < 8)
+    ).astype(bool)
     
     df = df.ffill().bfill()
     return df
@@ -209,7 +258,7 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 4. 评分系统（示例，完整版可继续添加）
+# 4. 评分系统（示例，完整版可继续扩展）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -223,7 +272,24 @@ def analyze_stock(df, name, current, symbol, money_flow):
     if last['浩哥缩量战法']:
         triggered.append("浩哥缩量战法")
         tech_score += 20.0
-    # (添加其他信号...)
+    if last['浩哥极缩战法']:
+        triggered.append("浩哥极缩战法")
+        tech_score += 25.0
+    if last['浩哥拐头战法']:
+        triggered.append("浩哥拐头战法")
+        tech_score += 18.0
+    if last['浩哥白线战法']:
+        triggered.append("浩哥白线战法")
+        tech_score += 22.0
+    if last['浩哥超级战法']:
+        triggered.append("浩哥超级战法")
+        tech_score += 28.0
+    if last['浩哥黄线战法']:
+        triggered.append("浩哥黄线战法")
+        tech_score += 15.0
+    if last['浩哥1.0战法']:
+        triggered.append("浩哥1.0战法")
+        tech_score += 10.0
     
     hao_score = 0.0
     if money_flow > 0.5: hao_score = 15.0
@@ -231,17 +297,27 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     total_score = min(100, tech_score + hao_score)
    
-    # 详细观察
+    # 详细技术面观察
     obs_lines = []
-    if last['macd'] > 0:
+    macd = last['macd'] if 'macd' in last else 0
+    if macd > 0:
         obs_lines.append("MACD柱线翻红，短期动能有修复迹象")
+    else:
+        obs_lines.append("MACD绿柱状态，动能偏弱")
+    
     if last['volume'] < last['vol_max20'] * 0.6:
-        obs_lines.append("量能持续萎缩，典型缩量调整")
+        obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
+    else:
+        obs_lines.append("成交量温和或放大，资金分歧较大")
+    
     if last['MA5'] > last['MA20'] > last['MA60']:
-        obs_lines.append("短期均线多头排列，趋势完整")
+        obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
+    elif last['close'] < last['MA20']:
+        obs_lines.append("股价跌破大哥黄线，注意风险")
     
-    obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价中性。"
+    obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
     
+    # 浩哥风格评论
     comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
     
     if triggered:
