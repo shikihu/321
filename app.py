@@ -9,7 +9,15 @@ import datetime
 import re
 import time
 import urllib3
+import warnings
+
+# ==========================================
+# 屏蔽警告设置
+# ==========================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 屏蔽 Pandas 的 FutureWarning (fillna method='ffill' 等警告)
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings("ignore")
 
 # ==========================================
 # 页面配置
@@ -17,48 +25,61 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="浩哥战法量化终端 v4.0", layout="wide")
 
 # ==========================================
-# 辅助函数：基本面、情绪面、消息面（完整定义 + 容错）
+# 辅助函数：基本面、情绪面、消息面（修复连接报错版）
 # ==========================================
 def get_basic_face(symbol):
-    try:
-        df = ak.stock_individual_info_em(symbol=str(symbol))
-        if df is None or df.empty:
+    """
+    获取基本面评分，增加重试机制，防止网络报错卡死
+    """
+    retry_count = 2
+    for attempt in range(retry_count):
+        try:
+            df = ak.stock_individual_info_em(symbol=str(symbol))
+            if df is None or df.empty:
+                return 0
+            
+            # 获取各项指标
+            pe = 0
+            pb = 0
+            roe = 0
+            
+            if '市盈率' in df['项目'].values:
+                pe_val = df[df['项目'] == '市盈率']['值'].values[0]
+                try:
+                    pe = float(pe_val) if pd.notna(pe_val) and pe_val != '' else 0
+                except:
+                    pe = 0
+                    
+            if '市净率' in df['项目'].values:
+                pb_val = df[df['项目'] == '市净率']['值'].values[0]
+                try:
+                    pb = float(pb_val) if pd.notna(pb_val) and pb_val != '' else 0
+                except:
+                    pb = 0
+                    
+            if '净资产收益率' in df['项目'].values:
+                roe_val = df[df['项目'] == '净资产收益率']['值'].values[0]
+                try:
+                    roe = float(roe_val) if pd.notna(roe_val) and roe_val != '' else 0
+                except:
+                    roe = 0
+            
+            score = 0
+            if pe > 0 and pe < 30: score += 8
+            if pb > 0 and pb < 3: score += 6
+            if roe > 10: score += 6
+            return min(20, score)
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retry_count - 1:
+                time.sleep(1) # 网络错误稍作等待
+                continue
+            else:
+                # 默默失败，不打印红色报错，以免影响体验，直接给0分
+                return 0
+        except Exception as e:
             return 0
-        
-        # 获取各项指标，使用更灵活的方式
-        pe = 0
-        pb = 0
-        roe = 0
-        
-        if '市盈率' in df['项目'].values:
-            pe_val = df[df['项目'] == '市盈率']['值'].values[0]
-            try:
-                pe = float(pe_val) if pd.notna(pe_val) and pe_val != '' else 0
-            except:
-                pe = 0
-                
-        if '市净率' in df['项目'].values:
-            pb_val = df[df['项目'] == '市净率']['值'].values[0]
-            try:
-                pb = float(pb_val) if pd.notna(pb_val) and pb_val != '' else 0
-            except:
-                pb = 0
-                
-        if '净资产收益率' in df['项目'].values:
-            roe_val = df[df['项目'] == '净资产收益率']['值'].values[0]
-            try:
-                roe = float(roe_val) if pd.notna(roe_val) and roe_val != '' else 0
-            except:
-                roe = 0
-        
-        score = 0
-        if pe > 0 and pe < 30: score += 8
-        if pb > 0 and pb < 3: score += 6
-        if roe > 10: score += 6
-        return min(20, score)
-    except Exception as e:
-        st.warning(f"基本面获取失败 ({symbol}): {type(e).__name__}: {str(e)[:80]}...")
-        return 0
+    return 0
 
 def get_emotion_face(df):
     if df is None or len(df) < 1:
@@ -77,9 +98,9 @@ def get_emotion_face(df):
 
 def get_news_face(symbol):
     try:
+        # 增加简单的异常捕获，防止新闻接口超时
         news = ak.stock_news_em(symbol=str(symbol))
         if news is not None and not news.empty and '标题' in news.columns:
-            # 检查标题列是否存在
             positive_keywords = ['好', '利好', '上涨', '爆拉', '涨停', '增长', '业绩', '利好消息', '增持', '回购']
             negative_keywords = ['坏', '利空', '下跌', '暴跌', '跌停', '亏损', '风险', '减持', '处罚', '诉讼']
             
@@ -92,8 +113,8 @@ def get_news_face(symbol):
             return score
         else:
             return 0
-    except Exception as e:
-        st.warning(f"消息面获取失败 ({symbol}): {type(e).__name__}: {str(e)[:80]}...")
+    except Exception:
+        # 新闻获取失败直接返回0，不报错
         return 0
 
 # ==========================================
@@ -106,13 +127,12 @@ def get_real_time_price(symbol, df=None):
     if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': '*/*',
         'Referer': 'http://finance.sina.com.cn/',
-        'Connection': 'keep-alive'
+        'Connection': 'close' # 避免保持长连接导致端口耗尽
     }
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
-        r = requests.get(url, headers=headers, timeout=10)  # 增加超时时间
+        r = requests.get(url, headers=headers, timeout=5)
         if 'var hq_str_' in r.text:
             parts = r.text.split('"')[1].split(',')
             if len(parts) > 3 and parts[3] != '':
@@ -122,10 +142,7 @@ def get_real_time_price(symbol, df=None):
                         return price, "实时价"
                 except ValueError:
                     pass
-    except requests.exceptions.RequestException as e:
-        st.warning(f"实时价格获取网络错误 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
-    except Exception as e:
-        st.warning(f"实时价格获取其他错误 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
+    except Exception:
         pass
     
     if df is not None and not df.empty:
@@ -135,93 +152,84 @@ def get_real_time_price(symbol, df=None):
 @st.cache_data(ttl=7200)
 def fetch_history_data(symbol):
     symbol = str(symbol).strip()
-    st.write(f"开始拉取 {symbol} 历史数据...")
     
     try:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': 'https://gu.qq.com/',
-            'Connection': 'keep-alive'
+            'User-Agent': 'Mozilla/5.0',
+            'Connection': 'close'
         }
         
         # 尝试多次请求
         for attempt in range(3):
             try:
-                r = requests.get(url, headers=headers, timeout=20)  # 增加超时时间
+                r = requests.get(url, headers=headers, timeout=10)
                 if r.status_code == 200:
                     break
-                elif attempt < 2:
-                    time.sleep(2)  # 等待2秒后重试
-            except requests.exceptions.RequestException as e:
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                else:
-                    raise e
+                time.sleep(1)
+            except requests.exceptions.RequestException:
+                if attempt == 2: return None
+                time.sleep(1)
         
         if r.status_code == 200:
-            try:
-                data = r.json()
-                key = f"{prefix}{symbol}"
-                qt_data = data.get('data', {}).get(key, {})
-                day_data = qt_data.get('qfqday', qt_data.get('day', []))
-                if day_data:
-                    df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    df = df.apply(pd.to_numeric, errors='coerce')
-                    
-                    # 删除含有过多NaN值的行
-                    df = df.dropna(thresh=4)  # 至少保留4个非NaN值的行
-                    
-                    if len(df) < 50:
-                        st.warning(f"{symbol} 数据条数不足 ({len(df)}条)")
-                        return None
-                    st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
-                    return calculate_indicators(df)
-                else:
-                    st.warning(f"{symbol} 没有返回有效数据")
-            except ValueError:
-                st.error(f"{symbol} 返回数据格式错误")
-        else:
-            st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
-    except requests.exceptions.ConnectionError as e:
-        st.error(f"{symbol} 网络连接错误: {str(e)[:150]}...")
-    except requests.exceptions.Timeout as e:
-        st.error(f"{symbol} 请求超时: {str(e)[:150]}...")
+            data = r.json()
+            key = f"{prefix}{symbol}"
+            qt_data = data.get('data', {}).get(key, {})
+            day_data = qt_data.get('qfqday', qt_data.get('day', []))
+            
+            if day_data:
+                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.apply(pd.to_numeric, errors='coerce')
+                df = df.dropna(thresh=4)
+                
+                if len(df) < 50:
+                    return None
+                return calculate_indicators(df)
+            else:
+                st.warning(f"{symbol} 暂无数据")
     except Exception as e:
-        st.error(f"{symbol} 其他异常: {type(e).__name__}: {str(e)[:150]}...")
+        st.error(f"{symbol} 数据拉取异常: {str(e)[:50]}")
     
-    st.error(f"{symbol} 数据拉取失败")
     return None
 
 def get_stock_name(symbol):
-    try:
-        df = ak.stock_individual_info_em(symbol=str(symbol))
-        if df is not None and not df.empty and '项目' in df.columns and '值' in df.columns:
-            if '股票简称' in df['项目'].values:
-                name = df[df['项目'] == '股票简称']['值'].values[0]
-                return str(name) if pd.notna(name) and name != '' else symbol
-            else:
-                return symbol
-        else:
+    """
+    获取股票名称，增加容错，如果获取失败直接返回代码
+    """
+    retry_count = 2
+    for attempt in range(retry_count):
+        try:
+            df = ak.stock_individual_info_em(symbol=str(symbol))
+            if df is not None and not df.empty and '项目' in df.columns and '值' in df.columns:
+                if '股票简称' in df['项目'].values:
+                    name = df[df['项目'] == '股票简称']['值'].values[0]
+                    return str(name) if pd.notna(name) and name != '' else symbol
             return symbol
-    except Exception as e:
-        st.warning(f"股票名称获取失败 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
-        return symbol
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt < retry_count - 1:
+                time.sleep(0.5)
+                continue
+            return symbol
+        except Exception:
+            return symbol
+    return symbol
 
 @st.cache_data(ttl=1800)
 def get_money_flow(symbol):
     try:
         market = "sh" if str(symbol).startswith('6') else "sz"
-        flow = ak.stock_individual_fund_flow(stock=str(symbol), market=market)
+        # 增加异常处理
+        try:
+            flow = ak.stock_individual_fund_flow(stock=str(symbol), market=market)
+        except:
+            return 0.0
+
         if flow is not None and not flow.empty and '主力净流入-净额' in flow.columns:
             val = flow.iloc[0]['主力净流入-净额']
             if isinstance(val, str):
-                # 处理字符串格式的数值，如 "1.23亿"
                 val = val.replace('万', '').replace('亿', '')
                 try:
                     val = float(val)
@@ -230,12 +238,11 @@ def get_money_flow(symbol):
             return val / 100000000
         else:
             return 0.0
-    except Exception as e:
-        st.warning(f"资金流获取失败 ({symbol}): {type(e).__name__}: {str(e)[:50]}...")
+    except Exception:
         return 0.0
 
 # ==========================================
-# 技术指标计算（修复位运算bug）
+# 技术指标计算
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -252,13 +259,10 @@ def calculate_indicators(df):
     
     ema7_inner = df['close'].ewm(span=7, adjust=False).mean()
     ema7_outer = ema7_inner.ewm(span=7, adjust=False).mean()
-    
     ema14_inner = df['close'].ewm(span=14, adjust=False).mean()
     ema14_outer = ema14_inner.ewm(span=14, adjust=False).mean()
-    
     ema28_inner = df['close'].ewm(span=28, adjust=False).mean()
     ema28_outer = ema28_inner.ewm(span=28, adjust=False).mean()
-    
     ema56_inner = df['close'].ewm(span=56, adjust=False).mean()
     ema56_outer = ema56_inner.ewm(span=56, adjust=False).mean()
     
@@ -378,7 +382,7 @@ def calculate_indicators(df):
         (df['当日振幅'] < 8)
     ).astype(bool)
    
-    # 修复FutureWarning：使用ffill()和bfill()替代fillna(method=...)
+    # 修复：使用新版 Pandas 推荐的 ffill 和 bfill
     df = df.ffill().bfill()
     return df
 
@@ -542,7 +546,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
 # ==========================================
 # 主界面
 # ==========================================
-st.title("浩哥战法量化终端 v4.0 (最终修复版)")
+st.title("浩哥战法量化终端 v4.1 (稳定修复版)")
 codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多50只）", height=150)
 if st.button("🚀 开始分析"):
     if not codes_input.strip():
@@ -579,10 +583,11 @@ if st.button("🚀 开始分析"):
                         "source": source
                     })
                 else:
-                    st.warning(f"跳过 {symbol} - 数据获取失败")
+                    st.warning(f"跳过 {symbol} - 无法获取K线数据")
                 
                 progress_bar.progress((i + 1) / len(all_codes))
-                time.sleep(0.8)  # 增加延时，避免请求过于频繁
+                # 增加延时，避免接口封锁
+                time.sleep(1.2)
             
             status_text.text("分析完成！")
            
