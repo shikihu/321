@@ -9,11 +9,11 @@ import datetime
 import re
 
 # ==========================================
-# 1. 数据服务
+# 数据服务（优先AkShare + 日志）
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
-    symbol = str(symbol)
+    symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
     if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -24,54 +24,57 @@ def get_real_time_price(symbol, df=None):
             parts = r.text.split('"')[1].split(',')
             if len(parts) > 3 and float(parts[3]) > 0:
                 return float(parts[3]), "实时价"
-    except:
-        pass
+    except Exception as e:
+        st.warning(f"实时价失败 ({symbol}): {str(e)[:80]}...")
     if df is not None and not df.empty:
         return df['close'].iloc[-1], "(盘后/最近收盘价)"
     return 0.0, "无数据"
 
 @st.cache_data(ttl=3600)
 def fetch_history_data(symbol):
-    symbol = str(symbol)
-    is_hk = len(symbol) == 4 and symbol.isdigit()
+    symbol = str(symbol).strip()
+    st.write(f"拉取 {symbol} 历史数据...")
     
-    if not is_hk:
+    # 优先 AkShare（最稳）
+    try:
+        end = datetime.datetime.now().strftime("%Y%m%d")
+        start = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
+        if not df.empty and len(df) > 50:
+            df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            st.write(f"{symbol} AkShare 成功，拉到 {len(df)} 条")
+            return calculate_indicators(df)
+        else:
+            st.warning(f"{symbol} AkShare 数据少或空 ({len(df) if df is not None else 'None'}条)")
+    except Exception as e:
+        st.error(f"{symbol} AkShare 异常: {str(e)[:100]}...")
+    
+    # 腾讯备用
+    try:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            r = requests.get(url, headers=headers, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                key = f"{prefix}{symbol}"
-                qt_data = data.get('data', {}).get(key, {})
-                day_data = qt_data.get('qfqday', qt_data.get('day', []))
-                if day_data:
-                    df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    df = df.apply(pd.to_numeric, errors='coerce')
-                    return calculate_indicators(df)
-        except:
-            pass
-    
-    try:
-        if is_hk:
-            df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            key = f"{prefix}{symbol}"
+            qt_data = data.get('data', {}).get(key, {})
+            day_data = qt_data.get('qfqday', qt_data.get('day', []))
+            if day_data:
+                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.apply(pd.to_numeric, errors='coerce')
+                st.write(f"{symbol} 腾讯成功，拉到 {len(df)} 条")
+                return calculate_indicators(df)
         else:
-            end = datetime.datetime.now().strftime("%Y%m%d")
-            start = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        
-        if not df.empty:
-            rename_map = {'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'}
-            df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            return calculate_indicators(df)
-    except:
-        pass
+            st.warning(f"{symbol} 腾讯状态码 {r.status_code}")
+    except Exception as e:
+        st.error(f"{symbol} 腾讯异常: {str(e)[:100]}...")
     
+    st.error(f"{symbol} 所有数据源失败，无法分析")
     return None
 
 def get_stock_name(symbol):
@@ -95,42 +98,8 @@ def get_money_flow(symbol):
         pass
     return 0.0
 
-def get_basic_face(symbol):
-    try:
-        df = ak.stock_individual_info_em(symbol=str(symbol))
-        pe = float(df[df['项目'] == '市盈率']['值'].values[0]) if '市盈率' in df['项目'].values else 0
-        pb = float(df[df['项目'] == '市净率']['值'].values[0]) if '市净率' in df['项目'].values else 0
-        roe = float(df[df['项目'] == '净资产收益率']['值'].values[0]) if '净资产收益率' in df['项目'].values else 0
-        score = 0
-        if pe > 0 and pe < 30: score += 8
-        if pb > 0 and pb < 3: score += 6
-        if roe > 10: score += 6
-        return min(20, score)
-    except:
-        return 0
-
-def get_emotion_face(df):
-    if df is None or len(df) < 1:
-        return 0
-    last = df.iloc[-1]
-    turnover = last['volume'] / last['流通股本'] if '流通股本' in last else 0
-    score = 0
-    if turnover < 0.08: score += 10
-    elif turnover < 0.15: score += 5
-    return score
-
-def get_news_face(symbol):
-    try:
-        news = ak.stock_news_em(symbol=str(symbol))
-        if not news.empty:
-            sentiment = news['标题'].str.contains('好|利好|上涨|爆拉|涨停').sum() - news['标题'].str.contains('坏|利空|下跌|暴跌|跌停').sum()
-            score = min(15, max(0, sentiment * 3))
-            return score
-    except:
-        return 0
-
 # ==========================================
-# 2. 技术指标计算（严格公式）
+# 技术指标计算（严格公式）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -199,16 +168,8 @@ def calculate_indicators(df):
     df['距离黄线'] = abs(df['close'] - df['大哥黄线']) / df['大哥黄线'] * 100
     df['回踩黄线'] = (df['close'] >= df['大哥黄线'] & (df['距离黄线'] <=1.5 | (df['距离黄线'] <=2 & df['当日涨跌幅'] <1))) | (df['close'] < df['大哥黄线'] & df['距离黄线'] <=0.8)
     
-    ma3 = df['close'].rolling(3).mean()
-    ma6 = df['close'].rolling(6).mean()
-    ma12 = df['close'].rolling(12).mean()
-    ma24 = df['close'].rolling(24).mean()
-    df['BBI'] = (ma3 + ma6 + ma12 + ma24) / 4
-    
-    df['距离BBI'] = abs(df['close'] - df['BBI']) / df['close'] * 100
-    
     # 信号判断（所有7种战法）
-    df['浩哥缩量战法'] = df['做上涨趋势'] & (df['J'] <14) & df['缩量'] & (df['当日振幅'] <8) & (df['当日涨跌幅'] <2.5 | (df['收阳线'] & df['当日涨跌幅'] <4)) & ((df['volume'] > df['vol_ma5']) | (df['大绿棒离得远']))
+    df['浩哥缩量战法'] = df['做上涨趋势'] & (df['J'] <14) & df['缩量'] & (df['当日振幅'] <8) & (df['当日涨跌幅'] <2.5 | (df['收阳线'] & df['当日涨跌幅'] <4))
     
     df['浩哥极缩战法'] = df['做上涨趋势'] & (df['J'] <14) & df['超缩量'] & (df['当日振幅'] <8)
     
@@ -241,7 +202,7 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 4. 评分系统（动态权重 + 只取最高胜率信号）
+# 4. 评分系统（价位动态权重 + 最高胜率信号）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -258,27 +219,28 @@ def analyze_stock(df, name, current, symbol, money_flow):
     else:
         tier = 'high'
     
-    # 信号与胜率对应表（5日胜率）
-    signals = [
-        {'name': '浩哥缩量战法', 'trigger': last['浩哥缩量战法'], 'low': 54, 'mid': 58, 'high': 56},
-        {'name': '浩哥极缩战法', 'trigger': last['浩哥极缩战法'], 'low': 59, 'mid': 63, 'high': 61},
-        {'name': '浩哥拐头战法', 'trigger': last['浩哥拐头战法'], 'low': 57, 'mid': 60, 'high': 59},
-        {'name': '浩哥白线战法', 'trigger': last['浩哥白线战法'], 'low': 61, 'mid': 65, 'high': 63},
-        {'name': '浩哥超级战法', 'trigger': last['浩哥超级战法'], 'low': 64, 'mid': 68, 'high': 66},
-        {'name': '浩哥黄线战法', 'trigger': last['浩哥黄线战法'], 'low': 56, 'mid': 59, 'high': 57},
-        {'name': '浩哥1.0战法', 'trigger': last['浩哥1.0战法'], 'low': 51, 'mid': 54, 'high': 52},
-    ]
+    # 信号胜率表（5日胜率）
+    signal_win = {
+        '浩哥缩量战法': {'low': 54, 'mid': 58, 'high': 56},
+        '浩哥极缩战法': {'low': 59, 'mid': 63, 'high': 61},
+        '浩哥拐头战法': {'low': 57, 'mid': 60, 'high': 59},
+        '浩哥白线战法': {'low': 61, 'mid': 65, 'high': 63},
+        '浩哥超级战法': {'low': 64, 'mid': 68, 'high': 66},
+        '浩哥黄线战法': {'low': 56, 'mid': 59, 'high': 57},
+        '浩哥1.0战法': {'low': 51, 'mid': 54, 'high': 52},
+    }
     
-    triggered_signals = [s for s in signals if s['trigger']]
+    triggered = []
+    for sig, win in signal_win.items():
+        if last.get(sig, False):
+            triggered.append((sig, win[tier]))
     
-    if not triggered_signals:
+    if not triggered:
         tech_score = 0.0
-        main_signal = "无信号"
+        main_sig = "无信号"
     else:
-        # 取当前价位段胜率最高的信号
-        main_signal = max(triggered_signals, key=lambda x: x[tier])
-        win_rate = main_signal[tier]
-        
+        # 取胜率最高信号
+        main_sig, win_rate = max(triggered, key=lambda x: x[1])
         # 胜率映射到0~50分
         if win_rate <= 40:
             tech_score = 0
@@ -289,56 +251,36 @@ def analyze_stock(df, name, current, symbol, money_flow):
         elif win_rate <= 65:
             tech_score = 35 + (win_rate - 60) / 5 * 10
         else:
-            tech_score = 45 + (win_rate - 65) / 5 * 5  # 上限50
+            tech_score = 45 + (win_rate - 65) / 5 * 5
         tech_score = min(50, max(0, tech_score))
     
-    # 基本面、情绪面、消息面
+    # 基本面/情绪/消息
     basic_score = get_basic_face(symbol)
     emotion_score = get_emotion_face(df)
     news_score = get_news_face(symbol)
     
     total_score = tech_score + basic_score + emotion_score + news_score
     
-    # 详细技术面观察
-    obs_lines = []
-    macd = last['macd'] if 'macd' in last else 0
-    if macd > 0:
-        obs_lines.append("MACD柱线翻红，短期动能有修复迹象")
-    else:
-        obs_lines.append("MACD绿柱状态，动能偏弱")
-    
-    if last['volume'] < last['vol_max20'] * 0.6:
-        obs_lines.append("量能持续萎缩，属于典型缩量调整形态")
-    else:
-        obs_lines.append("成交量温和或放大，资金分歧较大")
-    
-    if last['MA5'] > last['MA20'] > last['MA60']:
-        obs_lines.append("短期均线多头排列，趋势结构仍保持完整")
-    elif last['close'] < last['MA20']:
-        obs_lines.append("股价跌破大哥黄线，注意风险")
-    
-    obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
-    
-    # 浩哥风格评论
+    # 评论
     comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
     
-    if triggered_signals:
-        comment += f"浩哥检测到关键信号：{main_signal['name']}（当前价位段胜率最高）\n\n"
+    if main_sig != "无信号":
+        comment += f"浩哥检测到关键信号：{main_sig}（当前价位段最高胜率）\n\n"
     else:
         comment += "浩哥今天未检测到关键信号，形态未到最佳点。\n\n"
     
-    comment += f"【技术面评分】{tech_score:.1f}/50 【基本面评分】{basic_score:.1f}/20 【情绪面评分】{emotion_score:.1f}/15 【消息面评分】{news_score:.1f}/15 【浩哥综合打分】{total_score:.1f}/100\n\n"
+    comment += f"【技术面评分】{tech_score:.1f}/50 【基本面】{basic_score:.1f}/20 【情绪面】{emotion_score:.1f}/15 【消息面】{news_score:.1f}/15 【综合打分】{total_score:.1f}/100\n\n"
     
-    comment += f"技术面观察：{obs_text}\n\n"
+    comment += "技术面观察：待补充（MACD/量能/均线等）\n\n"
     
-    comment += f"资金面：主力净流入 {money_flow:.2f} 亿。浩哥认为当前风险大于机会，形态和情绪均未到位，短期不宜重仓。"
+    comment += f"资金面：主力净流入 {money_flow:.2f} 亿。"
     
     if total_score >= 80:
-        advice = "浩哥喊单：机会显著，重仓干！"
+        advice = "浩哥喊单：极品机会，重仓干！"
     elif total_score >= 60:
-        advice = "浩哥建议：形态还行，可以轻仓试试。"
+        advice = "浩哥建议：形态不错，可以搞。"
     else:
-        advice = "浩哥建议：暂时回避，保护本金，等更清晰信号。"
+        advice = "浩哥建议：有点鸡肋，换个更好的？"
     
     return total_score, comment, advice
 
@@ -348,19 +290,19 @@ def analyze_stock(df, name, current, symbol, money_flow):
 st.set_page_config(page_title="浩哥战法", layout="wide")
 st.title("浩哥战法量化终端 v4.0")
 
-codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多300只）", height=150)
+codes_input = st.text_area("输入股票代码（逗号或换行，最多300只）", height=150)
 if st.button("开始分析"):
     codes = re.findall(r'\d{6}', codes_input)
     codes = list(set(codes))[:300]
     if not codes:
-        st.error("没找到有效代码")
+        st.error("没找到代码")
     else:
         results = []
         progress = st.progress(0)
         status = st.empty()
        
         for i, symbol in enumerate(codes):
-            status.text(f"分析中 {i+1}/{len(codes)}: {symbol}")
+            status.text(f"分析 {i+1}/{len(codes)}: {symbol}")
             df = fetch_history_data(symbol)
             if df is not None:
                 name = get_stock_name(symbol)
@@ -379,24 +321,27 @@ if st.button("开始分析"):
                 })
             progress.progress((i + 1) / len(codes))
        
-        results.sort(key=lambda x: x['score'], reverse=True)
-        for i, res in enumerate(results):
-            res['rank'] = i + 1
-       
-        st.success(f"分析完成！共 {len(results)} 只票")
-       
-        for res in results:
-            c1, c2 = st.columns([1, 5])
-            with c1:
-                st.markdown(f"**第 {res['rank']} 名**")
-                st.metric("浩哥打分", f"{res['score']:.1f}/100")
-            with c2:
-                st.markdown(res['comment'])
-                st.markdown(f"**浩哥建议**：{res['advice']}")
-                st.caption(f"价格来源：{res['source']}")
-            
-            with st.expander("K线图"):
-                fig = plot_kline(res['df'], res['code'], res['name'])
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
+        if not results:
+            st.error("所有股票数据拉取失败，请检查网络或代码")
+        else:
+            results.sort(key=lambda x: x['score'], reverse=True)
+            for i, res in enumerate(results):
+                res['rank'] = i + 1
+           
+            st.success(f"分析完成！共 {len(results)} 只票")
+           
+            for res in results:
+                c1, c2 = st.columns([1, 5])
+                with c1:
+                    st.markdown(f"**第 {res['rank']} 名**")
+                    st.metric("浩哥打分", f"{res['score']:.1f}/100")
+                with c2:
+                    st.markdown(res['comment'])
+                    st.markdown(f"**浩哥建议**：{res['advice']}")
+                    st.caption(f"价格来源：{res['source']}")
+                
+                with st.expander("K线图"):
+                    fig = plot_kline(res['df'], res['code'], res['name'])
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                st.markdown("---")
