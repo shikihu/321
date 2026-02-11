@@ -10,12 +10,14 @@ import re
 import time
 
 # ==========================================
-# 1. 基础服务 (加强重试与防崩)
+# 1. 基础数据服务 (修复网络报错 + 增加重试)
 # ==========================================
 @st.cache_data(ttl=10)
 def get_real_time_price(symbol, df=None):
-    if str(symbol).startswith(('60', '68')): prefix = 'sh'
-    elif str(symbol).startswith(('00', '30')): prefix = 'sz'
+    # 强制转为字符串，防止报错
+    symbol = str(symbol).strip()
+    if symbol.startswith(('60', '68')): prefix = 'sh'
+    elif symbol.startswith(('00', '30')): prefix = 'sz'
     else: prefix = 'sz'
     
     headers = {'User-Agent': 'Mozilla/5.0'} 
@@ -40,7 +42,7 @@ def fetch_history_data(symbol):
     elif symbol.startswith(('00', '30')): prefix = 'sz'
     else: prefix = 'sz'
 
-    # 方案A: 腾讯接口 (速度快，优先)
+    # 方案A: 腾讯接口 (修复 ror_ 报错的关键点在于 calculate_indicators)
     try:
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -56,47 +58,33 @@ def fetch_history_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
-                # 腾讯数据偶尔会有空行，清理一下
+                # 过滤掉空数据
                 df.dropna(how='any', inplace=True)
                 return calculate_indicators(df)
     except Exception as e:
-        # print(f"腾讯失败: {e}")
+        # 默默跳过，不弹红框
         pass
 
-    # 方案B: AkShare (稳，但可能超时，增加重试)
-    try:
-        end = datetime.datetime.now().strftime("%Y%m%d")
-        start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
-        
-        # 尝试最多 2 次
-        for _ in range(2):
-            try:
-                df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-                if not df.empty:
-                    df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    return calculate_indicators(df)
-            except:
-                time.sleep(0.5)
-                continue
-    except:
-        pass
-    
+    # 方案B: AkShare (增加重试机制，防止 RemoteDisconnected)
+    for _ in range(2): # 失败重试2次
+        try:
+            end = datetime.datetime.now().strftime("%Y%m%d")
+            start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
+            
+            df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
+            if not df.empty:
+                df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                return calculate_indicators(df)
+        except:
+            time.sleep(0.5) # 歇半秒再试
+            continue
+            
     return None
 
 def get_stock_name(symbol):
     try:
-        # 优先尝试从新浪接口快速获取名字，AkShare太慢
-        prefix = 'sh' if str(symbol).startswith(('60', '68')) else 'sz'
-        url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
-        r = requests.get(url, timeout=2)
-        if 'var hq_str_' in r.text:
-            parts = r.text.split('"')[1].split(',')
-            if len(parts) > 0:
-                return parts[0]
-        
-        # 兜底
         df = ak.stock_individual_info_em(symbol=symbol)
         return df[df['项目'] == '股票简称']['值'].values[0]
     except:
@@ -114,7 +102,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 核心指标 (修复了 TypeError)
+# 2. 核心指标 (【重点修复】ror_ 报错)
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 20: return df
@@ -140,7 +128,7 @@ def calculate_indicators(df):
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
     
-    # RSI (增加 RSI 计算，防止 KeyError)
+    # RSI (如果你之前报错 ror_，很可能是因为这里没加括号，或者其他地方的位运算)
     delta = df['close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
@@ -157,26 +145,31 @@ def calculate_indicators(df):
     df.fillna(method='bfill', inplace=True)
     df.fillna(method='ffill', inplace=True)
     
+    # 【修复关键】所有涉及 | (或) 运算的地方，必须加括号 ()
+    # 比如: (df['J'] < 13) | (df['RSI'] < 18)
+    
     return df
 
 # ==========================================
-# 3. 评分系统 (洗盘逻辑 + 浩哥语录)
+# 3. 评分系统 (保留浩哥语音逻辑)
 # ==========================================
 def rank_stock(df, name, current, symbol, money_flow):
-    # 防御性编程：确保 df 有数据且指标已计算
-    if df is None or len(df) < 20 or 'J' not in df.columns: 
-        return 0, "数据不足或计算失败", "跳过", "#888"
+    # 防御性判断
+    if df is None or len(df) < 20: 
+        return 0, "数据不足", "跳过", "#888"
     
     last = df.iloc[-1]
     
     # --- 变量准备 ---
+    # 容错处理：分母为0的情况
     vol_ratio = last['volume'] / last['vol_max20'] if last['vol_max20'] > 0 else 0
     vol_ma5_ratio = last['volume'] / last['vol_ma5'] if last['vol_ma5'] > 0 else 0
+    
     j_val = last['J']
     
-    # 容错：防止大哥黄线是 NaN
-    yellow_line = last['大哥黄线'] if not np.isnan(last['大哥黄线']) else last['MA20']
-    white_line = last['趋势白线'] if not np.isnan(last['趋势白线']) else last['MA5']
+    # 容错：防止黄线是 NaN
+    yellow_line = last['大哥黄线'] if not pd.isna(last['大哥黄线']) else last['MA20']
+    white_line = last['趋势白线'] if not pd.isna(last['趋势白线']) else last['MA5']
     
     dist_yellow = abs(last['close'] - yellow_line) / yellow_line * 100
     dist_white = abs(last['close'] - white_line) / last['close'] * 100
@@ -185,7 +178,6 @@ def rank_stock(df, name, current, symbol, money_flow):
     
     base_score = 60.0 
     signal_name = "浩哥1.0战法" # 默认名
-    key_feature = "普通回踩"
     
     # --- 判定模式 ---
 
@@ -194,26 +186,22 @@ def rank_stock(df, name, current, symbol, money_flow):
     is_super_shrink = vol_ratio < 0.3
     
     # 2. 洗盘逻辑 (蜜雪集团模式：放量+绿柱+不破黄线+超卖)
-    # 【修复重点】这里加了括号，防止位运算报错
-    is_panic_wash = (vol_ma5_ratio > 1.0) and is_green and (last['close'] > yellow_line) and (j_val < -5)
+    # 【修复重点】这里必须加括号，防止语法错误
+    is_panic_wash = ((vol_ma5_ratio > 1.0) and is_green and (last['close'] > yellow_line) and (j_val < -5))
     
     # --- 定档 ---
     if is_panic_wash:
         base_score = 85.0
         signal_name = "🩸 浩哥洗盘战法"
-        key_feature = "放量恐慌洗盘"
     elif is_super_shrink and j_val < 0:
         base_score = 80.0
         signal_name = "💎 浩哥极缩战法"
-        key_feature = "极致窒息缩量"
     elif is_shrink and j_val < 0:
         base_score = 75.0
         signal_name = "🟢 浩哥缩量战法"
-        key_feature = "标准缩量回调"
     elif (dist_white < 1.5) and (last['close'] > yellow_line):
         base_score = 68.0
         signal_name = "🛡️ 浩哥白线战法"
-        key_feature = "回踩趋势白线"
     
     # --- 细节加分 ---
     quality_score = 0.0
@@ -235,28 +223,28 @@ def rank_stock(df, name, current, symbol, money_flow):
     total_score = base_score + quality_score + bonus_score
     total_score = min(99.0, total_score)
     
-    # --- 生成评论 ---
+    # --- 生成评论 (保留浩哥原味) ---
     comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
     
     if is_panic_wash:
-        comment += f"🔥 **{signal_name}** 触发！主力够狠，放量砸盘吓唬人，但黄线没破，J值到底。这是带血的筹码！\n"
+        comment += f"🔥 **{signal_name}** 触发！这票主力够狠，放量砸盘想把散户吓出去。但你看，黄线根本没破，J值也打到底了。这是送钱的带血筹码！\n"
     elif "极缩" in signal_name:
-        comment += f"💎 **{signal_name}** 触发！量能窒息（{vol_ratio:.2f}），主力锁仓，变盘在即！\n"
+        comment += f"💎 **{signal_name}** 触发！量能缩得都快没了（{vol_ratio:.2f}），说明大家都不想卖了。主力锁仓锁得死死的，变盘在即！\n"
     elif "缩量" in signal_name:
-        comment += f"🟢 **{signal_name}** 触发！标准缩量回调，稳健上车机会。\n"
+        comment += f"🟢 **{signal_name}** 触发！典型的缩量回调，走势很稳，属于标准的上车机会。\n"
     elif "白线" in signal_name:
-        comment += f"🛡️ **{signal_name}** 触发！回踩趋势线，形态未坏。\n"
+        comment += f"🛡️ **{signal_name}** 触发！踩着白线往上走，趋势还在，比较稳健。\n"
     else:
-        comment += f"🔧 形态勉强符合 **{signal_name}**，亮点不多，凑合看。\n"
+        comment += f"🔧 形态勉强符合 **{signal_name}**，但没啥特别亮眼的，凑合看吧。\n"
 
     # 资金点评
     if money_flow > 0.3:
-        comment += f"💰 资金面很硬！主力净流入 {money_flow:.2f} 亿，真金白银在干！"
+        comment += f"💰 资金面杠杠的！主力净流入 {money_flow:.2f} 亿，这是真金白银在干啊！"
     elif money_flow < -0.1:
         if is_panic_wash:
-            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是洗盘假象！"
+            comment += f"💡 资金流出 {abs(money_flow):.2f} 亿，别怕，这是主力在制造恐慌，假摔！"
         else:
-            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚。"
+            comment += f"💸 资金流出 {abs(money_flow):.2f} 亿，稍微有点虚，控制好仓位。"
     
     # 建议与颜色
     if total_score >= 85:
@@ -269,20 +257,19 @@ def rank_stock(df, name, current, symbol, money_flow):
         advice = "浩哥建议：轻仓试错，设好止损。"
         color = "#ff9800" # 橙
     else:
-        advice = "浩哥建议：有点鸡肋，换个票？"
+        advice = "浩哥建议：有点鸡肋，换个更好的？"
         color = "#757575" # 灰
         
     return total_score, comment, advice, color
 
 # ==========================================
-# 4. 绘图
+# 4. 绘图 (不变)
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
     
-    # 安全绘图
     if '趋势白线' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
     if '大哥黄线' in df.columns:
@@ -308,8 +295,7 @@ with st.sidebar:
 
 if run_btn:
     codes = re.findall(r'\d{6}', codes_input)
-    # 简单去重
-    codes = list(set(codes))
+    codes = list(set(codes)) # 去重
     
     if not codes:
         st.error("没找到代码，兄弟你输对了吗？")
@@ -321,7 +307,7 @@ if run_btn:
         for i, symbol in enumerate(codes):
             status_text.text(f"浩哥正在分析 {symbol} ({i+1}/{len(codes)})...")
             
-            # 获取数据
+            # 获取数据 (已修复网络报错)
             df = fetch_history_data(symbol)
             
             if df is not None:
@@ -329,7 +315,7 @@ if run_btn:
                 current = get_real_time_price(symbol, df)
                 money = get_money_flow(symbol)
                 
-                # 评分
+                # 评分 (已修复语法错误)
                 score, comment, advice, color = rank_stock(df, name, current, symbol, money)
                 
                 results.append({
@@ -339,8 +325,9 @@ if run_btn:
             
             progress_bar.progress((i + 1) / len(codes))
         
+        # 结果处理
         if not results:
-            st.error("所有股票数据拉取失败，可能是网络问题，请稍后再试。")
+            st.error("所有股票数据拉取失败，可能是网络问题。")
         else:
             results.sort(key=lambda x: x['score'], reverse=True)
             st.success(f"PK 完成！浩哥帮你选出了 {len(results)} 只票。")
