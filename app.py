@@ -9,13 +9,13 @@ import datetime
 import re
 
 # ==========================================
-# 1. 数据服务（稳定版，支持A股/港股）
+# 数据服务
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
     symbol = str(symbol)
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
-    if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'  # 港股
+    if len(symbol) == 4 and symbol.isdigit(): prefix = 'hk'
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
@@ -35,7 +35,6 @@ def fetch_history_data(symbol):
     symbol = str(symbol)
     is_hk = len(symbol) == 4 and symbol.isdigit()
     
-    # A股腾讯接口
     if not is_hk:
         prefix = 'sh' if symbol.startswith('6') else 'sz'
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
@@ -56,7 +55,6 @@ def fetch_history_data(symbol):
         except:
             pass
     
-    # AkShare 兜底（A股/港股）
     try:
         if is_hk:
             df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
@@ -98,7 +96,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 技术指标计算（严格按照你的公式）
+# 2. 技术指标（严格修正版）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -106,7 +104,6 @@ def calculate_indicators(df):
    
     df = df.copy()
    
-    # 均线
     df['MA5'] = df['close'].rolling(5, min_periods=1).mean()
     df['MA20'] = df['close'].rolling(20, min_periods=1).mean()
     df['MA60'] = df['close'].rolling(60, min_periods=1).mean()
@@ -138,7 +135,6 @@ def calculate_indicators(df):
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
    
-    # 量能
     df['vol_max20'] = df['volume'].rolling(20, min_periods=1).max()
     df['vol_ma5'] = df['volume'].rolling(5, min_periods=1).mean()
    
@@ -146,14 +142,14 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 3. K线图（大块显示）
+# 3. K线图（用趋势白线和大黄线绘图）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='大哥线'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['趋势白线'], line=dict(color='white', width=1), name='趋势白线'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
     fig.update_layout(title=f"{name} ({symbol}) - 浩哥专用图表", height=600, xaxis_rangeslider_visible=True, 
@@ -161,7 +157,7 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 4. 评分系统（详细技术面观察 + 浩哥风格评论）
+# 4. 评分系统（用修正后的白线/黄线计算距离）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -189,7 +185,6 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     total_score = min(100, tech_score + hao_score)
    
-    # 详细技术面观察
     obs_lines = []
     macd = last['macd'] if 'macd' in last else 0
     if macd > 0:
@@ -209,7 +204,6 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
    
-    # 浩哥风格评论
     comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
    
     if triggered:
@@ -235,7 +229,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
     return total_score, comment, advice, color
 
 # ==========================================
-# 主界面（简洁版 + 批量支持 + 排序）
+# 主界面
 # ==========================================
 st.set_page_config(page_title="浩哥战法", layout="wide")
 st.title("浩哥战法量化终端 v3.0")
@@ -243,7 +237,7 @@ st.title("浩哥战法量化终端 v3.0")
 codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多300只）", height=150)
 if st.button("开始分析"):
     codes = re.findall(r'\d{6}', codes_input)
-    codes = list(set(codes))[:300]  # 去重 + 限300只
+    codes = list(set(codes))[:300]
     if not codes:
         st.error("没找到有效代码")
     else:
@@ -272,7 +266,6 @@ if st.button("开始分析"):
                 })
             progress.progress((i + 1) / len(codes))
        
-        # 排序
         results.sort(key=lambda x: x['score'], reverse=True)
         for i, res in enumerate(results):
             res['rank'] = i + 1
