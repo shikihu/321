@@ -9,16 +9,16 @@ import datetime
 import re
 
 # ==========================================
-# 1. 数据服务（修复所有拉取失败 + 支持港股）
+# 1. 数据服务（修复版，支持港股）
 # ==========================================
 @st.cache_data(ttl=10)
 def get_real_time_price(symbol, df=None):
-    # 兼容A股/港股
-    if str(symbol).startswith(('60', '68')): prefix = 'sh'
-    elif str(symbol).startswith(('00', '30')): prefix = 'sz'
-    else: prefix = 'hk' if str(symbol).startswith(('0', '2', '8', '9')) else 'sz'
+    symbol = str(symbol)
+    if symbol.startswith(('60', '68')): prefix = 'sh'
+    elif symbol.startswith(('00', '30')): prefix = 'sz'
+    else: prefix = 'hk' if len(symbol) == 4 else 'sz'
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
         r = requests.get(url, headers=headers, timeout=3)
@@ -30,27 +30,27 @@ def get_real_time_price(symbol, df=None):
         pass
     
     if df is not None and not df.empty:
-        return df['close'].iloc[-1], "(盘后/最近收盘价)"
+        return df['close'].iloc[-1], "(非交易时间/最近收盘价)"
     return 0.0, "无数据"
 
 @st.cache_data(ttl=3600)
 def fetch_history_data(symbol):
-    symbol_str = str(symbol)
-    is_hk = symbol_str.startswith(('0', '2', '8', '9')) and len(symbol_str) == 4
+    symbol = str(symbol)
+    is_hk = len(symbol) == 4 and symbol.isdigit()
     
-    # A股用腾讯
+    # A股腾讯接口
     if not is_hk:
-        prefix = 'sh' if symbol_str.startswith('6') else 'sz'
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol_str},day,,,360,qfq"
+        prefix = 'sh' if symbol.startswith('6') else 'sz'
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
             r = requests.get(url, headers=headers, timeout=5)
             if r.status_code == 200:
                 data = r.json()
-                key = f"{prefix}{symbol_str}"
+                key = f"{prefix}{symbol}"
                 qt_data = data.get('data', {}).get(key, {})
                 day_data = qt_data.get('qfqday', qt_data.get('day', []))
-                if isinstance(day_data, list) and day_data:
+                if day_data:
                     df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
                     df['date'] = pd.to_datetime(df['date'])
                     df.set_index('date', inplace=True)
@@ -59,14 +59,14 @@ def fetch_history_data(symbol):
         except:
             pass
     
-    # 兜底 AkShare（支持港股）
+    # AkShare 兜底（A股/港股）
     try:
         if is_hk:
-            df = ak.stock_hk_daily(symbol=symbol_str, adjust="qfq")
+            df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
         else:
             end = datetime.datetime.now().strftime("%Y%m%d")
             start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist(symbol=symbol_str, period="daily", start_date=start, end_date=end, adjust="qfq")
+            df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
         
         if not df.empty:
             rename_map = {'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'}
@@ -81,7 +81,7 @@ def fetch_history_data(symbol):
 
 def get_stock_name(symbol):
     try:
-        if str(symbol).startswith(('0', '2', '8', '9')) and len(str(symbol)) == 4:
+        if len(str(symbol)) == 4 and str(symbol).isdigit():
             return ak.stock_hk_spot_em().query(f"代码 == '{symbol}'")['名称'].values[0]
         else:
             df = ak.stock_individual_info_em(symbol=str(symbol))
@@ -101,7 +101,7 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 2. 核心指标（修复 + 增加必要列）
+# 2. 核心指标（原版）
 # ==========================================
 def calculate_indicators(df):
     if df is None or len(df) < 5:
@@ -129,12 +129,11 @@ def calculate_indicators(df):
     df['vol_max20'] = df['volume'].rolling(20).max()
     df['vol_ma5'] = df['volume'].rolling(5).mean()
    
-    # 修复填充（避免弃用警告）
     df = df.ffill().bfill()
     return df
 
 # ==========================================
-# 3. K线图
+# 3. K线图（还原大块显示）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -144,11 +143,12 @@ def plot_kline(df, symbol, name):
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='大哥线'), row=1, col=1)
     colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol})", height=500, xaxis_rangeslider_visible=False, plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
+    fig.update_layout(title=f"{name} ({symbol})", height=600, width=1000, xaxis_rangeslider_visible=False, 
+                      plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
     return fig
 
 # ==========================================
-# 4. 评分系统（原汁原味浩哥风格 - 完整保留你的评论调性）
+# 4. 评分系统（100%还原你喜欢的浩哥语音版）
 # ==========================================
 def rank_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
@@ -199,7 +199,7 @@ def rank_stock(df, name, current, symbol, money_flow):
     total_score = base_score + quality_score + bonus_score
     total_score = min(99.0, total_score)
    
-    # 浩哥原汁原味评论（完全保留你风格）
+    # 浩哥原汁原味评论（完全还原你喜欢的风格）
     comment = f"浩哥瞅了瞅 {name}，现价 {current}。\n"
    
     if is_panic_wash:
@@ -237,21 +237,7 @@ def rank_stock(df, name, current, symbol, money_flow):
     return total_score, comment, advice, color
 
 # ==========================================
-# 4. K线图
-# ==========================================
-def plot_kline(df, symbol, name):
-    df = df.iloc[-120:]
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=1.5), name='大哥线'), row=1, col=1)
-    colors = ['red' if row['open'] < row['close'] else 'green' for i, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-    fig.update_layout(title=f"{name} ({symbol})", height=500, xaxis_rangeslider_visible=False, plot_bgcolor='#1e1e1e', paper_bgcolor='#0e1117', font=dict(color='white'))
-    return fig
-
-# ==========================================
-# 5. 主界面
+# 5. 主界面（还原大块 K线图布局）
 # ==========================================
 st.set_page_config(page_title="浩哥战法 PK", layout="wide")
 st.title("🏆 浩哥战法：优中选优 PK 终端 (v6.1 浩哥语音版)")
@@ -264,7 +250,7 @@ with st.sidebar:
     run_btn = st.button("开始 PK 排名", type="primary")
 
 if run_btn:
-    codes = re.findall(r'\d{5,6}', codes_input)  # 支持5位港股 + 6位A股
+    codes = re.findall(r'\d{5,6}', codes_input)
     if not codes:
         st.error("没找到代码，兄弟你输对了吗？")
     else:
@@ -298,19 +284,19 @@ if run_btn:
        
         for rank, res in enumerate(results):
             with st.container():
-                c1, c2, c3 = st.columns([1.2, 3.5, 1.5])
-               
+                c1, c2 = st.columns([1, 4])  # 还原：评论占大块
+                
                 with c1:
                     st.markdown(f"### 第 {rank+1} 名")
                     st.markdown(f"<h1 style='color: {res['color']}'>{res['score']:.1f}</h1>", unsafe_allow_html=True)
                     st.caption(f"{res['name']} ({res['code']})")
-               
+                
                 with c2:
                     st.markdown(res['comment'] + f"\n\n价格来源: {res['price_source']}")
-               
-                with c3:
-                    st.markdown(f"#### {res['advice']}")
-                    with st.expander("K线图"):
-                        st.plotly_chart(plot_kline(res['df'], res['code'], res['name']), use_container_width=True)
-               
+                    st.markdown(f"**浩哥建议：** {res['advice']}")
+                
+                with st.expander("查看 K线图（大图模式）"):
+                    fig = plot_kline(res['df'], res['code'], res['name'])
+                    st.plotly_chart(fig, use_container_width=True)  # 占满宽度
+                
             st.divider()
