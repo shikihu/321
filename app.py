@@ -9,7 +9,7 @@ import datetime
 import re
 
 # ==========================================
-# 数据服务（稳定版）
+# 数据服务
 # ==========================================
 @st.cache_data(ttl=300)
 def get_real_time_price(symbol, df=None):
@@ -25,7 +25,7 @@ def get_real_time_price(symbol, df=None):
     except:
         pass
     if df is not None and not df.empty:
-        return df['close'].iloc[-1], "(非交易时间/最近收盘价)"
+        return df['close'].iloc[-1], "(盘后/最近收盘价)"
     return 0.0, "无数据"
 
 @st.cache_data(ttl=3600)
@@ -46,16 +46,17 @@ def fetch_history_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
-                return calculate_indicators(df)
+                if len(df) > 300:  # 确保足够数据稳定计算
+                    return calculate_indicators(df)
     except:
         pass
 
     # AkShare 兜底
     try:
         end = datetime.datetime.now().strftime("%Y%m%d")
-        start = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
+        start = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime("%Y%m%d")  # 拉2年数据更稳
         df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        if not df.empty:
+        if not df.empty and len(df) > 300:
             df = df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'})
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
@@ -83,39 +84,33 @@ def get_money_flow(symbol):
     return 0.0
 
 # ==========================================
-# 技术指标计算
+# 技术指标（稳定版）
 # ==========================================
 def calculate_indicators(df):
-    if df is None or len(df) < 5:
+    if df is None or len(df) < 20:
         return df
    
     df = df.copy()
    
-    df['MA5'] = df['close'].rolling(5).mean()
-    df['MA20'] = df['close'].rolling(20).mean()
-    df['MA60'] = df['close'].rolling(60).mean()
+    df['MA5'] = df['close'].rolling(5, min_periods=1).mean()
+    df['MA20'] = df['close'].rolling(20, min_periods=1).mean()
+    df['MA60'] = df['close'].rolling(60, min_periods=1).mean()
    
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['dif'] = exp1 - exp2
-    df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
-    df['macd'] = 2 * (df['dif'] - df['dea'])
-   
-    low_min = df['low'].rolling(9).min()
-    high_max = df['high'].rolling(9).max()
+    low_min = df['low'].rolling(9, min_periods=1).min()
+    high_max = df['high'].rolling(9, min_periods=1).max()
     rsv = (df['close'] - low_min) / (high_max - low_min) * 100
     df['K'] = rsv.ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
    
-    df['vol_max20'] = df['volume'].rolling(20).max()
-    df['vol_ma5'] = df['volume'].rolling(5).mean()
+    df['vol_max20'] = df['volume'].rolling(20, min_periods=1).max()
+    df['vol_ma5'] = df['volume'].rolling(5, min_periods=1).mean()
    
     df = df.ffill().bfill()
     return df
 
 # ==========================================
-# K线图（大块显示）
+# K线图（大块还原）
 # ==========================================
 def plot_kline(df, symbol, name):
     df = df.iloc[-120:]
@@ -130,36 +125,34 @@ def plot_kline(df, symbol, name):
     return fig
 
 # ==========================================
-# 评分系统（还原详细技术面观察 + 浩哥风格评论）
+# 评分系统（详细技术面观察 + 浩哥风格评论）
 # ==========================================
 def analyze_stock(df, name, current, symbol, money_flow):
     if df is None or len(df) < 20:
-        return 0.0, "数据不足", "观望", "#888"
+        return 0.0, f"浩哥看 {name} 数据不足，无法分析。", "浩哥建议：暂缓操作。", "#888"
    
     last = df.iloc[-1]
    
-    # 基础信号判定（简化版，保留核心）
     triggered = []
     tech_score = 0.0
    
     j_val = last['J']
     dist_white = abs(last['close'] - last['MA5']) / last['close'] * 100 if last['close'] > 0 else 999
    
-    if j_val < 0 and last['volume'] < last['vol_max20'] * 0.5:
+    if j_val < 0 and last['volume'] < last['vol_max20'] * 0.6:
         triggered.append("浩哥缩量战法")
-        tech_score += 15.0
+        tech_score += 20.0
     if dist_white < 2.0 and last['close'] > last['MA20']:
         triggered.append("浩哥白线战法")
-        tech_score += 18.0
+        tech_score += 25.0
    
-    # 浩哥评分（资金面）
     hao_score = 0.0
     if money_flow > 0.5: hao_score = 15.0
     elif money_flow > 0: hao_score = 5.0
    
     total_score = min(100, tech_score + hao_score)
    
-    # 技术面详细观察（还原你喜欢的详细风格）
+    # 详细技术面观察
     obs_lines = []
     macd = last['macd'] if 'macd' in last else 0
     if macd > 0:
@@ -179,8 +172,8 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     obs_text = "；".join(obs_lines) + "。" if obs_lines else "量价关系中性。"
    
-    # 浩哥风格评论（还原血性、狠劲儿）
-    comment = f"浩哥对{name}的综合判断：当前价{current:.2f}元。\n\n"
+    # 浩哥风格评论
+    comment = f"浩哥对 {name} 的综合判断：当前价 {current:.2f} 元。\n\n"
    
     if triggered:
         comment += f"浩哥检测到关键信号：{' + '.join(triggered)}\n\n"
@@ -191,7 +184,7 @@ def analyze_stock(df, name, current, symbol, money_flow):
    
     comment += f"技术面观察：{obs_text}\n\n"
    
-    comment += f"资金面：主力净流入{money_flow:.2f}亿。浩哥认为当前风险大于机会，形态和情绪均未到位，短期不宜重仓。"
+    comment += f"资金面：主力净流入 {money_flow:.2f} 亿。浩哥认为当前风险大于机会，形态和情绪均未到位，短期不宜重仓。"
    
     if total_score >= 80:
         advice = "浩哥喊单：机会显著，重仓干！"
@@ -205,37 +198,63 @@ def analyze_stock(df, name, current, symbol, money_flow):
     return total_score, comment, advice, color
 
 # ==========================================
-# 主界面（简洁版）
+# 主界面（简洁 + 批量支持 + 排序）
 # ==========================================
 st.set_page_config(page_title="浩哥战法", layout="wide")
 st.title("浩哥战法量化终端 v3.0")
 
-codes_input = st.text_input("输入股票代码（逗号分隔）", "600519,000001")
+codes_input = st.text_area("输入股票代码（逗号或换行分隔，支持批量，最多300只）", height=150)
 if st.button("开始分析"):
-    codes = [c.strip() for c in codes_input.split(',') if c.strip()]
-    for symbol in codes:
-        with st.spinner(f"浩哥正在分析 {symbol}..."):
+    codes = re.findall(r'\d{6}', codes_input)
+    codes = list(set(codes))[:300]  # 去重 + 限300只
+    if not codes:
+        st.error("没找到有效代码")
+    else:
+        results = []
+        progress = st.progress(0)
+        status = st.empty()
+       
+        for i, symbol in enumerate(codes):
+            status.text(f"分析中 {i+1}/{len(codes)}: {symbol}")
             df = fetch_history_data(symbol)
-            name = get_stock_name(symbol)
-            current, price_source = get_real_time_price(symbol, df)
-            money = get_money_flow(symbol)
-           
             if df is not None:
+                name = get_stock_name(symbol)
+                current, source = get_real_time_price(symbol, df)
+                money = get_money_flow(symbol)
                 score, comment, advice, color = analyze_stock(df, name, current, symbol, money)
-               
-                c1, c2 = st.columns([1, 4])
-                with c1:
-                    st.markdown(f"<h2 style='color: {color}'>{score:.1f}/100</h2>", unsafe_allow_html=True)
-                    st.caption(f"{name} ({symbol})")
-                with c2:
-                    st.markdown(comment)
-                    st.markdown(f"**浩哥建议：** {advice}")
-                    st.caption(f"价格来源：{price_source}")
-               
-                with st.expander("查看 K线图"):
-                    fig = plot_kline(df, symbol, name)
-                    st.plotly_chart(fig, use_container_width=True)
-               
-                st.markdown("---")
-            else:
-                st.error(f"{symbol} 数据拉取失败")
+                results.append({
+                    "rank": 0,
+                    "code": symbol,
+                    "name": name,
+                    "score": score,
+                    "comment": comment,
+                    "advice": advice,
+                    "color": color,
+                    "df": df,
+                    "source": source
+                })
+            progress.progress((i + 1) / len(codes))
+       
+        # 排序
+        results.sort(key=lambda x: x['score'], reverse=True)
+        for i, res in enumerate(results):
+            res['rank'] = i + 1
+       
+        st.success(f"分析完成！共 {len(results)} 只票")
+       
+        for res in results:
+            c1, c2 = st.columns([1, 5])
+            with c1:
+                st.markdown(f"**第 {res['rank']} 名**")
+                st.markdown(f"<h2 style='color: {res['color']}'>{res['score']:.1f}/100</h2>", unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"**{res['name']} ({res['code']})**")
+                st.markdown(res['comment'])
+                st.markdown(f"**浩哥建议**：{res['advice']}")
+                st.caption(f"价格来源：{res['source']}")
+            
+            with st.expander("K线图"):
+                fig = plot_kline(res['df'], res['code'], res['name'])
+                st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("---")
