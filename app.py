@@ -22,63 +22,76 @@ warnings.filterwarnings("ignore")
 # ==========================================
 # 页面配置
 # ==========================================
-st.set_page_config(page_title="浩哥战法量化终端 v4.0", layout="wide")
+st.set_page_config(page_title="浩哥战法量化终端 v4.1 (基本面修复版)", layout="wide")
 
 # ==========================================
-# 辅助函数：基本面、情绪面、消息面（修复连接报错版）
+# 辅助函数：基本面、情绪面、消息面
 # ==========================================
 def get_basic_face(symbol):
     """
-    获取基本面评分，增加重试机制，防止网络报错卡死
+    获取基本面评分（修复版：模糊匹配字段，增加容错）
     """
     retry_count = 2
     for attempt in range(retry_count):
         try:
+            # 获取个股资料
             df = ak.stock_individual_info_em(symbol=str(symbol))
+            
             if df is None or df.empty:
                 return 0
             
-            # 获取各项指标
-            pe = 0
-            pb = 0
-            roe = 0
+            # 强制重命名列，防止API返回的列名改变（有时是 item/value，有时是 项目/值）
+            # 通常 API 返回两列，我们强制改为 standard keys 以便处理
+            if len(df.columns) >= 2:
+                df.columns = ['key', 'val']
+            else:
+                return 0
             
-            if '市盈率' in df['项目'].values:
-                pe_val = df[df['项目'] == '市盈率']['值'].values[0]
+            # 定义一个内部函数来安全提取数值
+            def get_value(keyword):
                 try:
-                    pe = float(pe_val) if pd.notna(pe_val) and pe_val != '' else 0
-                except:
-                    pe = 0
+                    # 只要列中包含该关键词（例如 "市盈率" 匹配 "市盈率(动)"）
+                    mask = df['key'].astype(str).str.contains(keyword, na=False)
+                    if not mask.any():
+                        return 0
                     
-            if '市净率' in df['项目'].values:
-                pb_val = df[df['项目'] == '市净率']['值'].values[0]
-                try:
-                    pb = float(pb_val) if pd.notna(pb_val) and pb_val != '' else 0
-                except:
-                    pb = 0
+                    val_str = str(df.loc[mask, 'val'].values[0])
                     
-            if '净资产收益率' in df['项目'].values:
-                roe_val = df[df['项目'] == '净资产收益率']['值'].values[0]
-                try:
-                    roe = float(roe_val) if pd.notna(roe_val) and roe_val != '' else 0
+                    # 处理非数字字符（如 "亏损"、"-"、"None" 等）
+                    if val_str in ['-', 'null', 'None', 'nan', ''] or '亏损' in val_str:
+                        return 0
+                    
+                    # 尝试转换为浮点数
+                    return float(val_str)
                 except:
-                    roe = 0
+                    return 0
+
+            # 获取各项指标 (模糊匹配)
+            pe = get_value('市盈率')      # 自动匹配 市盈率(动)、市盈率(TTM)
+            pb = get_value('市净率')      # 自动匹配 市净率
+            roe = get_value('净资产收益') # 自动匹配 净资产收益率、加权净资产收益率
             
+            # --- 评分逻辑 (保持原版) ---
             score = 0
+            # 1. 市盈率评分 (0 < PE < 30)
             if pe > 0 and pe < 30: score += 8
+            
+            # 2. 市净率评分 (0 < PB < 3)
             if pb > 0 and pb < 3: score += 6
+            
+            # 3. ROE评分 (ROE > 10)
             if roe > 10: score += 6
+                
             return min(20, score)
             
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt < retry_count - 1:
-                time.sleep(1) # 网络错误稍作等待
+                time.sleep(1)
                 continue
-            else:
-                # 默默失败，不打印红色报错，以免影响体验，直接给0分
-                return 0
-        except Exception as e:
             return 0
+        except Exception:
+            return 0
+            
     return 0
 
 def get_emotion_face(df):
@@ -203,10 +216,14 @@ def get_stock_name(symbol):
     for attempt in range(retry_count):
         try:
             df = ak.stock_individual_info_em(symbol=str(symbol))
-            if df is not None and not df.empty and '项目' in df.columns and '值' in df.columns:
-                if '股票简称' in df['项目'].values:
-                    name = df[df['项目'] == '股票简称']['值'].values[0]
-                    return str(name) if pd.notna(name) and name != '' else symbol
+            # 同样适配列名变化
+            if df is not None and not df.empty:
+                 if len(df.columns) >= 2:
+                    df.columns = ['key', 'val']
+                    mask = df['key'].astype(str).str.contains("简称", na=False)
+                    if mask.any():
+                        name = df.loc[mask, 'val'].values[0]
+                        return str(name) if pd.notna(name) and name != '' else symbol
             return symbol
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt < retry_count - 1:
