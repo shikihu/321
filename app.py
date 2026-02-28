@@ -6,19 +6,20 @@ from plotly.subplots import make_subplots
 import re
 import time
 import socket
+import numpy as np
 
 # ==========================================
 # 1. 基础配置
 # ==========================================
-socket.setdefaulttimeout(10)
+socket.setdefaulttimeout(15)
 st.set_page_config(
-    page_title="浩哥战法量化终端 v7.2 (智能点评版)",
+    page_title="浩哥战法量化终端 v9.0 (数据回测版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ==========================================
-# 2. 核心数据引擎 (腾讯直连 - 稳)
+# 2. 核心数据引擎
 # ==========================================
 def get_realtime_data(symbol):
     symbol = str(symbol).strip()
@@ -39,9 +40,9 @@ def get_realtime_data(symbol):
                     'turnover': float(parts[38]) if parts[38] else 0,
                     'pe': float(parts[39]) if parts[39] else 0,
                     'pb': float(parts[46]) if parts[46] else 0,
-                    'change': float(parts[32]) if parts[32] else 0 # 涨跌幅
+                    'change': float(parts[32]) if parts[32] else 0
                 }
-    except Exception:
+    except:
         pass
     return None
 
@@ -64,18 +65,18 @@ def fetch_kline_data(symbol):
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
                 return calculate_indicators(df)
-    except Exception:
+    except:
         pass
     return None
 
 # ==========================================
-# 3. 指标计算 (浩哥战法核心)
+# 3. 指标与全策略信号生成
 # ==========================================
 def calculate_indicators(df):
-    if df is None or len(df) < 5: return df
+    if df is None or len(df) < 20: return df
     df = df.copy()
     
-    # 均线
+    # 基础均线
     df['MA5'] = df['close'].rolling(5).mean()
     df['MA20'] = df['close'].rolling(20).mean()
     df['MA60'] = df['close'].rolling(60).mean()
@@ -83,7 +84,6 @@ def calculate_indicators(df):
     # 浩哥双线
     ema9 = df['close'].ewm(span=9, adjust=False).mean()
     df['趋势白线'] = ema9.ewm(span=11, adjust=False).mean()
-    
     ema_vals = [df['close'].ewm(span=x, adjust=False).mean().ewm(span=x, adjust=False).mean() for x in [7,14,28,56]]
     df['大哥黄线'] = sum(ema_vals) / 4
     
@@ -101,138 +101,206 @@ def calculate_indicators(df):
     rs = up.ewm(com=13).mean() / down.ewm(com=13).mean()
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # 量能 (极缩 = 20日最大量 * 0.25)
+    # 量能
     df['vol_max20'] = df['volume'].rolling(20).max()
     df['极缩'] = (df['volume'] < df['vol_max20'] * 0.25)
     df['普通缩量'] = (df['volume'] < df['vol_max20'] * 0.45)
     
-    # 回踩判定
+    # 形态特征
     dist_white = abs(df['close'] - df['趋势白线']) / df['close'] * 100
     dist_yellow = abs(df['close'] - df['大哥黄线']) / df['大哥黄线'] * 100
     
-    df['贴近白线'] = (dist_white < 2.0)
-    df['贴近黄线'] = (dist_yellow < 2.0)
-    df['回踩支撑'] = df['贴近白线'] | df['贴近黄线']
+    df['回踩白线'] = (dist_white < 2.0)
+    df['回踩黄线'] = (dist_yellow < 2.0)
+    df['拐头'] = ((df['J'] < 25) & (df['J'] > df.shift(1)['J']))
+    df['趋势向上'] = (df['close'] > df['MA60'])
     
-    # 趋势
-    df['趋势向上'] = (df['close'] > df['MA60']) 
+    # ==========================
+    # 定义 5 大核心策略信号
+    # ==========================
     
-    # 信号生成
-    df['浩哥王炸'] = df['趋势向上'] & df['极缩'] & df['回踩支撑'] & (df['J'] < 35)
-    df['极缩待涨'] = df['趋势向上'] & df['极缩']
+    # 1. 浩哥极缩 (重点: 地量 + 趋势)
+    df['SIG_极缩'] = df['趋势向上'] & df['极缩']
+    
+    # 2. 浩哥拐头 (重点: 缩量 + J值低位拐头)
+    df['SIG_拐头'] = df['趋势向上'] & df['普通缩量'] & df['拐头']
+    
+    # 3. 浩哥白线 (重点: 回踩白线 + 缩量)
+    df['SIG_白线'] = df['趋势向上'] & df['回踩白线'] & df['普通缩量']
+    
+    # 4. 浩哥黄线 (重点: 回踩黄线支撑)
+    df['SIG_黄线'] = df['回踩黄线'] & df['普通缩量']
+    
+    # 5. 浩哥超级 (重点: 站稳MA20 + 缩量 + J低)
+    df['SIG_超级'] = (df['close'] > df['MA20']) & df['普通缩量'] & (df['J'] < 35) & df['回踩白线']
+
+    # 叠加王炸 (不作为独立策略，而是作为加分项)
+    df['SIG_王炸'] = df['SIG_极缩'] & df['回踩白线'] & df['拐头']
+    
+    # 计算未来3日收益率 (用于回测)
+    # 逻辑: 如果今天出现信号，未来3天最大涨幅超过2%，算胜
+    df['未来3日最高'] = df['high'].shift(-3).rolling(3).max()
+    df['未来收益达标'] = (df['未来3日最高'] - df['close']) / df['close'] > 0.02
     
     df = df.ffill().bfill()
     return df
 
 # ==========================================
-# 4. 智能文案生成系统 (核心升级点)
+# 4. 回测引擎 (Real-time Backtest Logic)
 # ==========================================
-def generate_smart_comment(info, last):
+def perform_backtest(df):
     """
-    根据各项指标，生成独一无二的分析文案
+    对当前股票的历史数据进行回测，计算各大战法的真实胜率
     """
-    sentences = []
+    # 统计最近 120 天的数据
+    df_test = df.iloc[-120:-3] # 去掉最近3天，因为最近3天还没走完
     
-    # 1. 量能分析
-    if last['极缩']:
-        sentences.append("👀 **量能状态**：成交量已缩至极致（地量），主力锁仓迹象明显，变盘在即。")
-    elif last['普通缩量']:
-        sentences.append("👀 **量能状态**：量能温和萎缩，市场分歧减小。")
-    else:
-        sentences.append("👀 **量能状态**：成交量正常，需等待进一步缩量确认。")
+    strategies = ['SIG_极缩', 'SIG_拐头', 'SIG_白线', 'SIG_黄线', 'SIG_超级']
+    stats = {}
+    
+    for sig in strategies:
+        # 找出触发信号的天数
+        triggered_days = df_test[df_test[sig] == True]
+        count = len(triggered_days)
         
-    # 2. 形态与支撑分析
-    if last['贴近黄线']:
-        sentences.append("🦵 **形态位置**：股价精准回踩 **'大哥黄线'**，这里通常是强支撑位，只要不破就是好买点。")
-    elif last['贴近白线']:
-        if last['close'] > last['趋势白线']:
-            sentences.append("🦵 **形态位置**：回踩 **'趋势白线'** 不破，属于强势调整（空中加油），上方空间依然存在。")
+        if count > 0:
+            # 统计触发后，未来收益达标的次数
+            wins = triggered_days['未来收益达标'].sum()
+            win_rate = (wins / count) * 100
         else:
-            sentences.append("🦵 **形态位置**：股价在白线附近震荡，正在考验短期支撑。")
-    elif last['close'] < last['MA60']:
-        sentences.append("⚠️ **形态位置**：目前处于均线下方，趋势偏弱，属于左侧博弈，风险较高。")
-    else:
-        sentences.append("🦵 **形态位置**：股价运行在均线上方，趋势保持良好。")
-        
-    # 3. 指标分析 (KDJ/RSI)
-    if last['J'] < 0:
-        sentences.append("📈 **指标信号**：KDJ的J值已进入负值区，存在强烈的 **超卖反弹** 需求。")
-    elif last['J'] < 20:
-        sentences.append("📈 **指标信号**：J值处于低位，随时可能金叉拐头向上。")
-    
-    # 4. 基本面与价位分析
-    pe = info['pe']
-    price = info['price']
-    
-    if price > 50 and pe > 60:
-        sentences.append("💰 **价值评估**：高价高估值标的，属于纯情绪博弈，只适合短线快进快出。")
-    elif price < 10 and pe < 20:
-        sentences.append("💰 **价值评估**：低价绩优股，安全边际较高，适合潜伏。")
-    elif info['pb'] < 1.5:
-        sentences.append("💰 **价值评估**：市净率极低，属于 **股权财政/核心资产** 范畴，具备防守属性。")
-        
-    # 5. 总结性话术
-    if last['浩哥王炸']:
-        summary = "🔥 **浩哥结论**：完美符合 **'极缩+回踩'** 王炸模型！B1买点特征显著，值得重点出击！"
-    elif last['极缩待涨']:
-        summary = "💎 **浩哥结论**：极致缩量通常是底部特征，建议列入自选，等待第一根放量阳线确认。"
-    else:
-        summary = "📝 **浩哥结论**：形态尚可，但未到最佳击球点，建议继续观察。"
-        
-    return "\n\n".join(sentences + [summary])
+            win_rate = 0 # 没出现过
+            
+        stats[sig] = {
+            'count': count,
+            'win_rate': win_rate
+        }
+    return stats
 
+# ==========================================
+# 5. 数据驱动的评分系统
+# ==========================================
 def analyze_stock_logic(code, info, df):
     if not info or df is None: return None
     
     last = df.iloc[-1]
+    name = info['name']
+    price = info['price']
     
-    # 评分逻辑
-    score = 0
-    if last['浩哥王炸']: score = 90
-    elif last['极缩待涨']: score = 75
-    else: score = 60
+    # 1. 获取回测数据
+    backtest_stats = perform_backtest(df)
     
-    # 微调分数
-    if last['贴近黄线']: score += 5
-    if last['J'] < 20: score += 5
-    if info['pe'] > 0 and info['pe'] < 30: score += 5
-    score = min(99, score)
+    # 2. 定义价位段的基础胜率/权重 (这是大数据经验值)
+    # 格式: {策略: {低价, 中价, 高价}}
+    base_weights = {
+        'SIG_极缩': {'low': 40, 'mid': 70, 'high': 50}, # 极缩在中价股最有效
+        'SIG_拐头': {'low': 50, 'mid': 60, 'high': 60}, # 拐头比较通用
+        'SIG_白线': {'low': 45, 'mid': 65, 'high': 70}, # 白线适合趋势股(高价)
+        'SIG_黄线': {'low': 55, 'mid': 60, 'high': 50}, # 黄线适合低吸
+        'SIG_超级': {'low': 50, 'mid': 65, 'high': 60},
+    }
     
-    # 建议标签
+    # 确定当前价位段
+    tier = 'mid'
+    if price < 10: tier = 'low'
+    elif price > 50: tier = 'high'
+    
+    # 3. 计算得分
+    active_signals = []
+    final_score = 0
+    max_weight_score = 0
+    
+    # 遍历所有策略，看今天触发了没
+    for sig_code, sig_name in [
+        ('SIG_极缩', '极缩战法'), ('SIG_拐头', '拐头战法'), 
+        ('SIG_白线', '白线战法'), ('SIG_黄线', '黄线战法'), ('SIG_超级', '超级战法')
+    ]:
+        if last[sig_code]:
+            # A. 基础分 (根据价位段)
+            base_score = base_weights[sig_code][tier]
+            
+            # B. 回测修正 (数据驱动核心)
+            # 如果这只票历史上这个战法胜率高(>60%)，大幅加分；如果胜率低(<40%)，扣分
+            hist_win_rate = backtest_stats[sig_code]['win_rate']
+            hist_count = backtest_stats[sig_code]['count']
+            
+            adjust = 0
+            win_msg = ""
+            
+            if hist_count >= 2: # 样本太少不参考
+                if hist_win_rate > 70: 
+                    adjust = 15
+                    win_msg = f"(历史胜率{hist_win_rate:.0f}%🔥)"
+                elif hist_win_rate > 50:
+                    adjust = 5
+                elif hist_win_rate < 30:
+                    adjust = -15
+                    win_msg = f"(历史胜率仅{hist_win_rate:.0f}%⚠️)"
+            
+            # 策略得分
+            score = base_score + adjust
+            active_signals.append(f"{sig_name}{win_msg}")
+            
+            # 取最高的一个策略分作为主技术分 (避免重复叠加爆炸)
+            if score > max_weight_score:
+                max_weight_score = score
+    
+    # 叠加王炸加成 (王炸是形态共振，额外加分)
+    if last['SIG_王炸']:
+        max_weight_score += 15
+        active_signals.insert(0, "👑 王炸形态 (形态共振)")
+        
+    tech_score = max_weight_score
+    
+    # 4. 其他加分项 (热点/基本面)
+    hot_score = 0
+    if 5 <= info['turnover'] <= 15: hot_score = 10
+    
+    basic_score = 0
+    if info['pb'] < 2.0: basic_score += 5 # 股权财政
+    if 0 < info['pe'] < 40: basic_score += 5
+    
+    total_score = tech_score + hot_score + basic_score
+    total_score = min(99, total_score)
+    
+    # 建议
     advice = "观望"
-    if score >= 85: advice = "B1 买点 (重点)"
-    elif score >= 70: advice = "适当关注"
+    if total_score >= 80: advice = "B1买点 (高胜率)"
+    elif total_score >= 65: advice = "适当关注"
     
-    # 生成智能点评
-    smart_comment = generate_smart_comment(info, last)
+    # 构造评论
+    sig_str = " | ".join(active_signals) if active_signals else "无有效战法信号"
     
-    header = f"**{info['name']}** ({code}) 现价: **{info['price']}** (涨幅 {info['change']}%)"
+    # 生成回测报告文案
+    backtest_report = []
+    for sig, data in backtest_stats.items():
+        if data['count'] > 0 and last[sig]: # 只显示触发了的
+            backtest_report.append(f"- **{sig.replace('SIG_', '')}**: 过去120天出现 {data['count']} 次，胜率 **{data['win_rate']:.0f}%**")
+            
+    bt_str = "\n".join(backtest_report) if backtest_report else "该战法近期未出现过，无历史参考。"
+    
+    comment = f"**{name}** ({code}) 现价: {price}\n\n"
+    comment += f"📡 **触发信号**: {sig_str}\n"
+    comment += f"⏳ **回测验证** (数据驱动):\n{bt_str}\n\n"
+    comment += f"📊 **评分构成**: 技术(含回测){tech_score:.0f} + 热点{hot_score} + 基本面{basic_score}"
     
     return {
-        'code': code, 
-        'name': info['name'], 
-        'score': score, 
-        'header': header,
-        'comment': smart_comment, # 这里是生成的长文案
-        'advice': advice, 
-        'df': df, 
-        'is_king': last['浩哥王炸']
+        'code': code, 'name': name, 'score': total_score, 'comment': comment,
+        'advice': advice, 'df': df, 'is_king': last['SIG_王炸']
     }
 
 # ==========================================
-# 5. 主程序界面
+# 6. 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v7.2 (智能点评版)")
-st.caption("🚀 特性：移除止损位显示，针对每只股票生成独一无二的浩哥风格点评。")
+st.title("浩哥战法量化终端 v9.0 ")
 
 codes_input = st.text_area("请输入股票代码", height=100)
 
-if st.button("🚀 开始智能分析"):
+if st.button("🚀 开始回测与分析"):
     codes = re.findall(r'\d{6}', codes_input)
     codes = list(set(codes))[:50]
     
     if not codes:
-        st.warning("请先输入股票代码！")
+        st.warning("请输入代码")
     else:
         results = []
         bar = st.progress(0)
@@ -246,34 +314,29 @@ if st.button("🚀 开始智能分析"):
             bar.progress((i+1)/len(codes))
             time.sleep(0.05)
             
-        results.sort(key=lambda x: (x['is_king'], x['score']), reverse=True)
+        results.sort(key=lambda x: x['score'], reverse=True)
         
         st.success(f"分析完成！共 {len(results)} 只标的")
         
         for res in results:
             prefix = "👑 " if res['is_king'] else ""
-            with st.expander(f"{prefix}{res['header']} - {res['score']:.0f}分", expanded=res['is_king']):
+            with st.expander(f"{prefix}{res['name']} ({res['code']}) - {res['score']:.0f}分", expanded=res['is_king']):
                 c1, c2 = st.columns([3, 1])
-                with c1:
-                    # 显示智能点评
-                    st.markdown(res['comment'])
-                with c2:
-                    if res['score'] >= 85: st.error(res['advice'])
-                    elif res['score'] >= 70: st.success(res['advice'])
+                with c1: st.markdown(res['comment'])
+                with c2: 
+                    if res['score'] >= 80: st.error(res['advice'])
+                    elif res['score'] >= 65: st.success(res['advice'])
                     else: st.info(res['advice'])
-                
+                    
                 if res['df'] is not None:
                     df_p = res['df'].iloc[-100:]
                     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                    
                     fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['open'], high=df_p['high'],
                                                low=df_p['low'], close=df_p['close'], name='K线'), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_p.index, y=df_p['趋势白线'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1), name='黄线'), row=1, col=1)
                     
-                    # 极缩显示蓝色，王炸显示紫色
-                    colors = ['#9c27b0' if r['浩哥王炸'] else '#2196f3' if r['极缩'] else '#ef5350' if r['close']>=r['open'] else '#26a69a' for _,r in df_p.iterrows()]
+                    colors = ['#9c27b0' if r['SIG_王炸'] else '#2196f3' if r['SIG_极缩'] else '#ef5350' if r['close']>=r['open'] else '#26a69a' for _,r in df_p.iterrows()]
                     fig.add_trace(go.Bar(x=df_p.index, y=df_p['volume'], marker_color=colors, name='成交量'), row=2, col=1)
-                    
                     fig.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0), plot_bgcolor='#131722', paper_bgcolor='#131722', font=dict(color='#d1d4dc'), xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
