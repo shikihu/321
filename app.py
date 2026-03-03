@@ -11,20 +11,21 @@ import numpy as np
 # ==========================================
 # 1. 基础配置
 # ==========================================
-socket.setdefaulttimeout(20) # 增加全局超时到20秒
+socket.setdefaulttimeout(20)
 st.set_page_config(
-    page_title="浩哥战法量化终端 v11.1 (故障诊断版)",
+    page_title="浩哥战法量化终端 v11.2 (紧急修复版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # 伪装浏览器头
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Connection': 'close'
 }
 
 # ==========================================
-# 2. 核心数据引擎 (带错误报告)
+# 2. 核心数据引擎
 # ==========================================
 def get_realtime_data(symbol):
     symbol = str(symbol).strip()
@@ -32,32 +33,26 @@ def get_realtime_data(symbol):
     code = f"{prefix}{symbol}"
     try:
         url = f"http://qt.gtimg.cn/q={code}"
-        # 增加超时到10秒
         r = requests.get(url, headers=HEADERS, timeout=10)
         r.encoding = 'gbk'
         text = r.text
         
-        # 检查返回内容是否为空
         if not text or f'v_{code}="' not in text:
-            st.error(f"❌ {code}: 腾讯接口未返回数据，可能是代码错误或停牌。")
             return None
 
-        if f'v_{code}="' in text:
-            data_str = text.split('"')[1]
-            parts = data_str.split('~')
-            if len(parts) > 45:
-                return {
-                    'name': parts[1],
-                    'price': float(parts[3]),
-                    'turnover': float(parts[38]) if parts[38] else 0,
-                    'pe': float(parts[39]) if parts[39] else 0,
-                    'pb': float(parts[46]) if parts[46] else 0,
-                    'change': float(parts[32]) if parts[32] else 0
-                }
-            else:
-                st.error(f"❌ {code}: 数据字段不足，解析失败。")
-    except Exception as e:
-        st.error(f"❌ {code} 实时数据连接报错: {str(e)}")
+        data_str = text.split('"')[1]
+        parts = data_str.split('~')
+        if len(parts) > 45:
+            return {
+                'name': parts[1],
+                'price': float(parts[3]),
+                'turnover': float(parts[38]) if parts[38] else 0,
+                'pe': float(parts[39]) if parts[39] else 0,
+                'pb': float(parts[46]) if parts[46] else 0,
+                'change': float(parts[32]) if parts[32] else 0
+            }
+    except Exception:
+        pass
     return None
 
 @st.cache_data(ttl=3600)
@@ -66,15 +61,12 @@ def fetch_kline_data(symbol):
     prefix = 'sh' if symbol.startswith('6') else 'sz'
     try:
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
-        r = requests.get(url, headers=HEADERS, timeout=10) # 增加超时
+        r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
             
-            if 'data' not in data:
-                st.warning(f"⚠️ {code}: K线接口返回格式异常")
-                return None
-
+            # 兼容处理
             day_data = data.get('data', {}).get(key, {}).get('qfqday', [])
             if not day_data:
                 day_data = data.get('data', {}).get(key, {}).get('day', [])
@@ -86,15 +78,13 @@ def fetch_kline_data(symbol):
                 df = df.apply(pd.to_numeric, errors='coerce')
                 return calculate_indicators(df)
             else:
-                st.warning(f"⚠️ {symbol}: 未找到K线数据 (可能是新股或停牌)")
-        else:
-            st.error(f"❌ {symbol}: K线接口HTTP错误 {r.status_code}")
+                st.warning(f"⚠️ {symbol}: 暂无K线数据")
     except Exception as e:
-        st.error(f"❌ {symbol} K线数据报错: {str(e)}")
+        st.error(f"❌ {symbol} K线计算报错: {str(e)}")
     return None
 
 # ==========================================
-# 3. 核心算法
+# 3. 核心算法 (修复KDJ缺失问题)
 # ==========================================
 def calculate_sma(series, period, weight=1):
     return series.ewm(alpha=weight/period, adjust=False).mean()
@@ -114,11 +104,13 @@ def calculate_indicators(df):
     ema_vals = [df['close'].ewm(span=x, adjust=False).mean().ewm(span=x, adjust=False).mean() for x in [7,14,28,56]]
     df['大哥黄线'] = sum(ema_vals) / 4
     
-    # KDJ
+    # --- KDJ (修复BUG处) ---
     low_min = df['low'].rolling(9).min()
     high_max = df['high'].rolling(9).max()
     rsv = (df['close'] - low_min) / (high_max - low_min) * 100
     df['K'] = rsv.ewm(com=2).mean()
+    # 【修复】之前漏了这行计算 D 值的代码
+    df['D'] = df['K'].ewm(com=2).mean() 
     df['J'] = 3 * df['K'] - 2 * df['D']
 
     # 砖型图
@@ -228,13 +220,12 @@ def analyze_stock_logic(code, info, df):
 # ==========================================
 # 5. 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v11.1 (故障诊断版)")
-st.caption("🛠️ 如果扫描没有结果，请查看下方的红色报错信息。")
+st.title("浩哥战法量化终端 v11.2 (紧急修复版)")
+st.caption("🛠️ 修复了 000859 等股票因 KDJ 计算缺失导致的报错问题。")
 
 codes_input = st.text_area("请输入股票代码 (例如: 600519)", height=100)
 
 if st.button("🚀 扫描并诊断"):
-    # 提取代码
     codes = re.findall(r'\d{6}', codes_input)
     codes = list(set(codes))[:50]
     
@@ -246,30 +237,25 @@ if st.button("🚀 扫描并诊断"):
         status = st.empty()
         
         for i, code in enumerate(codes):
-            status.text(f"正在诊断并分析: {code} ...")
+            status.text(f"分析中: {code} ...")
             
-            # 1. 获取实时
             info = get_realtime_data(code)
-            
             if info:
-                # 2. 获取K线
                 df = fetch_kline_data(code)
                 if df is not None:
-                    # 3. 分析
                     res = analyze_stock_logic(code, info, df)
                     if res: results.append(res)
                 else:
                     st.warning(f"⚠️ {code}: 实时数据获取成功，但K线数据缺失。")
             else:
-                # 如果info是None，get_realtime_data内部已经打印了Error
                 pass
                 
             bar.progress((i+1)/len(codes))
-            time.sleep(0.1) # 增加间隔，防止请求过快
+            time.sleep(0.1)
             
         if results:
             results.sort(key=lambda x: x['score'], reverse=True)
-            st.success(f"✅ 分析完成！成功获取 {len(results)} / {len(codes)} 只股票数据。")
+            st.success(f"✅ 分析完成！共 {len(results)} 只股票。")
             
             for res in results:
                 prefix = "🚀 [完美共振] " if res['score'] >= 95 else "👑 " if res['score'] >= 88 else ""
@@ -312,4 +298,4 @@ if st.button("🚀 扫描并诊断"):
                         fig.update_layout(height=650, margin=dict(l=0,r=0,t=0,b=0), plot_bgcolor='#131722', paper_bgcolor='#131722', font=dict(color='#d1d4dc'), xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("⚠️ 扫描结束，但没有生成任何结果。请检查上方是否有红色的报错信息。")
+            st.warning("⚠️ 扫描结束，没有生成结果。")
