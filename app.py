@@ -13,19 +13,18 @@ import numpy as np
 # ==========================================
 socket.setdefaulttimeout(20)
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.2 (防崩溃最终版)",
+    page_title="浩哥战法量化终端 v14.3 (无懈可击版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 侧边栏：缓存清理工具
+# 侧边栏：缓存清理
 with st.sidebar:
-    st.header("🔧 工具箱")
-    if st.button("🗑️ 清除所有缓存 (报错点我)"):
+    st.header("🔧 维护工具")
+    if st.button("🗑️ 清除缓存 (修复报错)"):
         st.cache_data.clear()
-        st.success("缓存已清除！请重新点击扫描。")
+        st.success("缓存已清除，请重新运行！")
 
-# 伪装浏览器头
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Connection': 'close'
@@ -82,14 +81,13 @@ def fetch_kline_data(symbol):
     return None
 
 # ==========================================
-# 3. 核心算法 (防崩设计)
+# 3. 核心算法 (关键修复: 预初始化列)
 # ==========================================
 def sma(series, n, m=1): return series.ewm(alpha=m/n, adjust=False).mean()
 def hhv(series, n): return series.rolling(n).max()
 def llv(series, n): return series.rolling(n).min()
 
 def calculate_indicators(df):
-    # 1. 长度检查
     if df is None or len(df) < 60: 
         df['数据不足'] = True
         return df
@@ -97,11 +95,19 @@ def calculate_indicators(df):
     df = df.copy()
     df['数据不足'] = False
     
-    # 2. 初始化所有信号列 (防止 KeyError 核心修复)
-    # 先把所有可能用到的信号列都设为 False，确保列一定存在
-    all_sigs = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B', '浩哥王炸', '砖型翻红']
-    for col in all_sigs:
+    # --- 关键修复：预先初始化所有关键列 ---
+    # 无论后续计算是否报错，这些列都必须存在，防止KeyError
+    init_cols = [
+        '拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B', 
+        '浩哥王炸', '砖型翻红', '浩哥极缩', '收益达标'
+    ]
+    for col in init_cols:
         df[col] = False
+        
+    # 初始化价格列，防止绘图报错
+    df['趋势白线'] = np.nan
+    df['大哥黄线'] = np.nan
+    df['止损价'] = np.nan
 
     try:
         C, O, H, L, V = df['close'], df['open'], df['high'], df['low'], df['volume']
@@ -158,8 +164,6 @@ def calculate_indicators(df):
         uar6a = (sma(sma((C - llv4) / range4 * 100, 6, 1), 6, 1) + 100) - (sma(uar1a, 4, 1) + 100)
         df['砖型图'] = np.where(uar6a > 4, uar6a - 4, 0)
         
-        # ====== 信号赋值 ======
-        
         # 1. 拐头B
         df['拐头B'] = df['做上涨趋势'] & (df['RSI']-15 >= df['RSI'].shift(1)) & \
                      ((df['RSI'].shift(1)<25) | (df['J'].shift(1)<20)) & \
@@ -193,15 +197,13 @@ def calculate_indicators(df):
                      (df['大哥黄线']>=df['大哥黄线'].shift(1)*0.995) & \
                      (df['MA60']>=df['MA60'].shift(1)*0.999)
         
-        # 7. 砖型翻红
         df['砖型翻红'] = (df['砖型图'] > 0) & (df['砖型图'].shift(1) == 0)
-        
-        # 8. 浩哥王炸
         df['浩哥极缩'] = df['极缩'] & (df['回踩白线'] | df['回踩黄线'])
         df['浩哥王炸'] = df['浩哥极缩'] & df['砖型翻红']
 
-        # 收益与止损
+        # 收益与止损 (关键点)
         df['未来3日最高'] = H.shift(-3).rolling(3).max()
+        # 这里计算成功与否，如果报错，df['收益达标'] 还是初始化的 False
         df['收益达标'] = (df['未来3日最高'] - C) / C > 0.02
         
         df['技术支撑'] = df[['MA20', '大哥黄线']].max(axis=1)
@@ -209,7 +211,6 @@ def calculate_indicators(df):
         df['目标价'] = df['high'].rolling(20).max()
         
     except Exception:
-        # 如果中间计算报错，保持默认的False值，防止KeyError
         pass
 
     df = df.ffill().bfill()
@@ -230,13 +231,10 @@ def perform_matrix_backtest(df, current_price):
         return None, {}, ["⚠️ 数据不足"]
 
     df_test = df.iloc[-120:-3]
-    
-    # 仅检测存在的列
     all_strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
     strategies = [s for s in all_strategies if s in df.columns]
     
     backtest_result = {}
-    
     tier_info = {}
     for t_name, t_data in TIER_MATRIX.items():
         if t_data['min'] <= current_price < t_data['max']:
@@ -244,19 +242,17 @@ def perform_matrix_backtest(df, current_price):
             break
     
     history_report = []
-    
     for sig in strategies:
         try:
             triggered = df_test[df_test[sig] == True]
             count = len(triggered)
-            
             win_rate = 0
-            if count > 0:
+            # 必须检查收益达标列是否存在
+            if count > 0 and '收益达标' in triggered.columns:
                 wins = triggered['收益达标'].sum()
                 win_rate = (wins / count) * 100
                 
             backtest_result[sig] = {'count': count, 'win_rate': win_rate}
-            
             if count >= 1:
                 history_report.append(f"{sig}: {count}次(胜率{win_rate:.0f}%)")
         except:
@@ -277,7 +273,7 @@ def analyze_stock_logic(code, info, df):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return {
             'code': code, 'name': name, 'score': 0,
-            'comment': "数据不足，无法分析", 'advice': "跳过", 'df': df, 'has_signal': False
+            'comment': "数据不足", 'advice': "跳过", 'df': df, 'has_signal': False
         }
 
     tier_info, bt_result, hist_report = perform_matrix_backtest(df, price)
@@ -286,7 +282,6 @@ def analyze_stock_logic(code, info, df):
     signals = []
     active_sigs = []
     
-    # 遍历信号
     for sig, data in bt_result.items():
         if sig in last and last[sig]:
             active_sigs.append(sig)
@@ -307,13 +302,11 @@ def analyze_stock_logic(code, info, df):
             
             if current_score > score: score = current_score
 
-    # 砖型图加分
     if '砖型翻红' in last and last['砖型翻红']:
         signals.append("🧱 砖型起爆")
         score = max(score, 88)
         active_sigs.append('砖型翻红')
 
-    # 基本面/消息面加分
     if info['pb'] < 2.0: score += 5
     if 5 <= info['turnover'] <= 15: score += 5
     
@@ -331,8 +324,11 @@ def analyze_stock_logic(code, info, df):
     comment += f"📡 **信号**: {sig_str}\n"
     comment += f"⏳ **回测**: {hist_str}\n"
     
-    if '止损价' in df.columns:
-        comment += f"🛡️ **止损**: {last['止损价']:.2f}"
+    try:
+        stop_loss = last.get('止损价', 0)
+        if stop_loss > 0:
+            comment += f"\n🛡️ **止损**: {stop_loss:.2f}"
+    except: pass
     
     return {
         'code': code, 'name': name, 'score': score, 
@@ -343,8 +339,8 @@ def analyze_stock_logic(code, info, df):
 # ==========================================
 # 6. 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.2 (防崩溃最终版)")
-st.caption("🚀 修复说明：增加了列名预填充和缓存清理功能，彻底解决 KeyError 问题。")
+st.title("浩哥战法量化终端 v14.3 (无懈可击版)")
+st.caption("🚀 修复说明：增加列名强制初始化，彻底解决 KeyError: '收益达标' 问题。")
 
 codes_input = st.text_area("请输入股票代码", height=100)
 
@@ -391,12 +387,12 @@ if st.button("🚀 矩阵回测分析"):
                     if '大哥黄线' in df_p.columns:
                         fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1), name='黄线'), row=1, col=1)
                     
-                    # 标记信号
+                    # 标记信号 (增加保护)
                     sigs = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
                     colors = ['#FFD700', '#FF0000', '#FFFFFF', '#00FFFF', '#FFC0CB', '#FFA500']
                     
                     for sig, color in zip(sigs, colors):
-                        if sig in df_p.columns:
+                        if sig in df_p.columns and '收益达标' in df_p.columns:
                             win_data = df_p[(df_p[sig]==True) & (df_p['收益达标']==True)]
                             if not win_data.empty:
                                  fig.add_trace(go.Scatter(x=win_data.index, y=win_data['low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name=f'{sig}成功'))
