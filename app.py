@@ -13,7 +13,7 @@ import numpy as np
 # ==========================================
 socket.setdefaulttimeout(20)
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.0 (回测矩阵修正版)",
+    page_title="浩哥战法量化终端 v14.1 (稳定性修复版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -25,7 +25,7 @@ HEADERS = {
 }
 
 # ==========================================
-# 2. 核心数据引擎 (腾讯直连)
+# 2. 核心数据引擎
 # ==========================================
 def get_realtime_data(symbol):
     symbol = str(symbol).strip()
@@ -70,20 +70,27 @@ def fetch_kline_data(symbol):
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df = df.apply(pd.to_numeric, errors='coerce')
+                # 只要有数据就尝试计算，内部做长度保护
                 return calculate_indicators(df)
     except: pass
     return None
 
 # ==========================================
-# 3. 核心算法 (指标修正 + 宽容度微调)
+# 3. 核心算法 (带安全检查)
 # ==========================================
 def sma(series, n, m=1): return series.ewm(alpha=m/n, adjust=False).mean()
 def hhv(series, n): return series.rolling(n).max()
 def llv(series, n): return series.rolling(n).min()
 
 def calculate_indicators(df):
-    if df is None or len(df) < 60: return df
+    # 如果数据太短(新股)，直接返回，不计算复杂指标
+    if df is None or len(df) < 60: 
+        # 标记为数据不足，避免后续报错
+        df['数据不足'] = True
+        return df
+        
     df = df.copy()
+    df['数据不足'] = False # 标记数据正常
     
     C, O, H, L, V = df['close'], df['open'], df['high'], df['low'], df['volume']
     RC = C.shift(1)
@@ -98,15 +105,14 @@ def calculate_indicators(df):
     df['当日振幅'] = (H - L) / L * 100
     df['当日涨跌幅'] = abs(C - RC) / RC * 100
     df['上涨十字星'] = (C > RC) & (abs(C - O) / O * 100 < 1.8)
-    # 动态振幅区间: 针对002471这种活跃票，振幅可能稍微大一点，这里设宽容度
     df['振幅区间'] = 8.5 
     
-    # --- 缩量系列 (微调阈值，防止漏信号) ---
+    # --- 缩量系列 ---
     hhv20, hhv30, hhv50 = hhv(V, 20), hhv(V, 30), hhv(V, 50)
-    df['缩量'] = (V < hhv20 * 0.45) | (V < hhv50 / 3) # 从0.416放宽到0.45
-    df['回踩缩量'] = (V < hhv20 * 0.5) | (V < hhv50 / 3) # 从0.45放宽到0.5
-    df['适当缩量'] = (V < hhv20 * 0.65) | (V < hhv50 / 3) # 从0.618放宽到0.65
-    df['超缩量'] = (V < hhv30 / 3.5) | (V < hhv50 / 5)   # 放宽
+    df['缩量'] = (V < hhv20 * 0.45) | (V < hhv50 / 3) 
+    df['回踩缩量'] = (V < hhv20 * 0.5) | (V < hhv50 / 3)
+    df['适当缩量'] = (V < hhv20 * 0.65) | (V < hhv50 / 3)
+    df['超缩量'] = (V < hhv30 / 3.5) | (V < hhv50 / 5)
     
     # --- KDJ & RSI ---
     rsv = (C - llv(L, 9)) / (hhv(H, 9) - llv(L, 9)) * 100
@@ -121,17 +127,15 @@ def calculate_indicators(df):
     # --- 异动与辅助 ---
     df['近期振幅'] = (hhv(H, 20) - llv(L, 20)) / llv(L, 20) * 100
     df['远期振幅'] = (hhv(H, 50) - llv(L, 50)) / llv(L, 50) * 100
-    # 不是大绿棒: 允许微跌，不允许放量大阴线
     df['不是大绿棒'] = ~((C < O) & (C < RC * 0.96) & (V > RC['volume'] * 1.1))
     
-    # --- 核心信号逻辑 (002471 修复重点) ---
+    # --- 核心信号逻辑 ---
     df['做上涨趋势'] = (df['趋势白线'] >= df['大哥黄线'] * 0.99) & \
                       ((C >= df['大哥黄线']) | ((C > df['大哥黄线'] * 0.97) & (C>O)))
     
     dist_white = abs(C - df['趋势白线']) / C * 100
     dist_yellow = abs(C - df['大哥黄线']) / df['大哥黄线'] * 100
     
-    # 回踩放宽: 2.0 -> 2.5
     df['回踩白线'] = ((C >= df['趋势白线']) & (dist_white <= 2.5)) | ((C < df['趋势白线']) & (dist_white < 1.0))
     df['回踩黄线'] = ((C >= df['大哥黄线']) & (dist_yellow <= 2.5)) | ((C < df['大哥黄线']) & (dist_yellow <= 1.0))
     
@@ -161,15 +165,14 @@ def calculate_indicators(df):
     df['白线B'] = ((df['J']<35)|(df['RSI']<45)) & \
                  df['回踩白线'] & df['不是大绿棒'] & df['回踩缩量'] & (L<=RC)
 
-    # 6. 回踩黄线B (重点修复)
-    # 002471 应该在这里触发。放宽条件：J<13 -> J<18, MA60向上 -> MA60不跌
+    # 6. 回踩黄线B
     df['黄线B'] = (df['趋势白线']>=df['大哥黄线']) & (C>=df['大哥黄线']*0.97) & \
                  ((df['J']<18)|(df['RSI']<23)) & df['回踩黄线'] & df['不是大绿棒'] & \
                  (df['缩量'] | df['适当缩量']) & \
                  (df['大哥黄线']>=df['大哥黄线'].shift(1)*0.995) & \
-                 (df['MA60']>=df['MA60'].shift(1)*0.999) # 允许轻微走平
+                 (df['MA60']>=df['MA60'].shift(1)*0.999)
 
-    # 收益达标: 未来3天最大涨幅 > 2% 算成功
+    # 收益达标
     df['未来3日最高'] = H.shift(-3).rolling(3).max()
     df['收益达标'] = (df['未来3日最高'] - C) / C > 0.02
     
@@ -177,10 +180,9 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 4. 矩阵回测引擎 (核心升级)
+# 4. 矩阵回测引擎 (带KeyError修复)
 # ==========================================
 
-# 浩哥战法 - 不同价位段的“理论胜率”矩阵 (经验值)
 TIER_MATRIX = {
     'low':  {'min': 0, 'max': 8,   'base_score': 50, 'name': '低价股'},
     'mid':  {'min': 8, 'max': 50,  'base_score': 70, 'name': '黄金价位'},
@@ -188,15 +190,16 @@ TIER_MATRIX = {
 }
 
 def perform_matrix_backtest(df, current_price):
-    """
-    对当前个股进行【历史回测】
-    返回：
-    1. 信号历史胜率 (在这只票上好不好使？)
-    2. 价位段评分 (符合浩哥选股区间吗？)
-    """
-    df_test = df.iloc[-120:-3] # 过去半年，去掉最近3天
+    # 关键修复：如果数据不足，直接返回空结果，防止报错
+    if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
+        return None, {}, ["⚠️ 数据不足(次新股)，无法回测"]
+
+    df_test = df.iloc[-120:-3] # 过去半年
     
-    strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
+    # 关键修复：检查列是否存在
+    all_strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
+    strategies = [s for s in all_strategies if s in df.columns]
+    
     backtest_result = {}
     
     # 1. 确定价位段
@@ -207,11 +210,9 @@ def perform_matrix_backtest(df, current_price):
             break
             
     # 2. 个股历史回测
-    stock_quality = 0 # 股性分
     history_report = []
     
     for sig in strategies:
-        # 找出历史触发点
         triggered = df_test[df_test[sig] == True]
         count = len(triggered)
         
@@ -225,7 +226,6 @@ def perform_matrix_backtest(df, current_price):
             'win_rate': win_rate
         }
         
-        # 如果这只票历史上这个信号胜率高，记录下来
         if count >= 1:
             history_report.append(f"{sig}: 出现{count}次, 胜率{win_rate:.0f}%")
 
@@ -241,25 +241,28 @@ def analyze_stock_logic(code, info, df):
     name = info['name']
     price = info['price']
     
+    # 如果数据不足
+    if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
+        return {
+            'code': code, 'name': name, 'score': 0,
+            'comment': f"**{name}** ({code})\n⚠️ 上市时间太短或数据不足，无法计算战法指标。",
+            'advice': "数据不足", 'df': df, 'has_signal': False
+        }
+
     # 执行矩阵回测
     tier_info, bt_result, hist_report = perform_matrix_backtest(df, price)
     
     score = 0
     signals = []
-    active_sigs = [] # 记录触发的信号名
+    active_sigs = [] 
     
     # 遍历所有信号
     for sig, data in bt_result.items():
-        if last[sig]: # 今天触发了
+        if sig in last and last[sig]: # 关键修复：检查sig是否在last里
             active_sigs.append(sig)
             
-            # A. 基础分 (由价位决定)
-            # 例如：中价股基础分70，低价股50
-            current_score = tier_info['base_score']
+            current_score = tier_info.get('base_score', 60)
             
-            # B. 个股回测修正 (由历史胜率决定)
-            # 如果这只票历史上这个信号胜率 > 60%，加分
-            # 如果胜率 < 40%，扣分 (说明这票不吃这一套)
             if data['count'] > 0:
                 if data['win_rate'] >= 60: 
                     current_score += 15
@@ -270,11 +273,9 @@ def analyze_stock_logic(code, info, df):
                 else:
                     signals.append(f"{sig} (历史胜率{data['win_rate']:.0f}%)")
             else:
-                # 历史上没出现过，属于新信号，给一点奖励分
                 current_score += 5
                 signals.append(f"{sig} (稀缺信号🆕)")
             
-            # 取最高分作为最终技术分
             if current_score > score:
                 score = current_score
 
@@ -289,18 +290,20 @@ def analyze_stock_logic(code, info, df):
     elif score >= 70: advice = "A级 (值得关注)"
     elif score >= 60: advice = "B级 (需谨慎)"
     
-    # 构造评论
     sig_str = " + ".join(signals) if signals else "无 B1 信号"
     hist_str = " | ".join(hist_report) if hist_report else "该股近期无此类信号记录"
     
     comment = f"**{name}** ({code}) 现价: {price}\n\n"
-    comment += f"📊 **价位属性**: {tier_info['name']} (基础分 {tier_info['base_score']})\n"
+    comment += f"📊 **价位属性**: {tier_info.get('name', '未知')} (基础分 {tier_info.get('base_score', 60)})\n"
     comment += f"📡 **今日信号**: {sig_str}\n"
     comment += f"⏳ **历史回测**: \n> {hist_str}\n"
     
     # 止损位
-    stop_loss = df[['趋势白线', '大哥黄线']].max(axis=1).iloc[-1] * 0.97
-    comment += f"\n🛡️ **止损参考**: {stop_loss:.2f}"
+    try:
+        stop_loss = df[['趋势白线', '大哥黄线']].max(axis=1).iloc[-1] * 0.97
+        comment += f"\n🛡️ **止损参考**: {stop_loss:.2f}"
+    except:
+        pass
     
     return {
         'code': code, 'name': name, 'score': score, 
@@ -311,8 +314,8 @@ def analyze_stock_logic(code, info, df):
 # ==========================================
 # 6. 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.0 (回测矩阵修正版)")
-st.caption("🚀 修复说明：修正了回踩黄线B等信号的触发阈值(如002471)，并引入个股历史回测胜率，只有'历史上确实能涨'的票才给高分。")
+st.title("浩哥战法量化终端 v14.1 (稳定性修复版)")
+st.caption("🚀 修复说明：彻底解决了 KeyError 报错问题，增加数据长度检查，防止次新股卡死程序。")
 
 codes_input = st.text_area("请输入股票代码 (例如: 002471, 002339)", height=100)
 
@@ -349,25 +352,30 @@ if st.button("🚀 矩阵回测分析"):
                     elif res['score'] >= 60: st.success(res['advice'])
                     else: st.info(res['advice'])
                     
-                if res['df'] is not None:
+                if res['df'] is not None and len(res['df']) > 20:
                     df_p = res['df'].iloc[-100:]
                     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
                     
                     fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['open'], high=df_p['high'], low=df_p['low'], close=df_p['close'], name='K线'), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_p.index, y=df_p['趋势白线'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1), name='黄线'), row=1, col=1)
+                    if '趋势白线' in df_p.columns:
+                        fig.add_trace(go.Scatter(x=df_p.index, y=df_p['趋势白线'], line=dict(color='white', width=1), name='白线'), row=1, col=1)
+                    if '大哥黄线' in df_p.columns:
+                        fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1), name='黄线'), row=1, col=1)
                     
-                    # 标记历史成功的买点 (用绿色箭头)
+                    # 标记信号
                     sigs = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
-                    for sig in sigs:
-                        win_data = df_p[(df_p[sig]==True) & (df_p['收益达标']==True)]
-                        if not win_data.empty:
-                             fig.add_trace(go.Scatter(x=win_data.index, y=win_data['low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name=f'{sig}成功'))
+                    colors = ['#FFD700', '#FF0000', '#FFFFFF', '#00FFFF', '#FFC0CB', '#FFA500']
                     
-                    # 标记今天的信号 (用黄色大箭头)
+                    for sig, color in zip(sigs, colors):
+                        if sig in df_p.columns:
+                            win_data = df_p[(df_p[sig]==True) & (df_p['收益达标']==True)]
+                            if not win_data.empty:
+                                 fig.add_trace(go.Scatter(x=win_data.index, y=win_data['low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name=f'{sig}成功'))
+                    
+                    # 今日信号
                     current_sigs = df_p.iloc[[-1]]
                     for sig in sigs:
-                        if current_sigs[sig].values[0]:
+                        if sig in current_sigs.columns and current_sigs[sig].values[0]:
                              fig.add_trace(go.Scatter(x=current_sigs.index, y=current_sigs['low']*0.96, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold'), name=f'今日{sig}'))
 
                     fig.add_trace(go.Bar(x=df_p.index, y=df_p['volume'], name='成交量'), row=2, col=1)
