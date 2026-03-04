@@ -9,7 +9,7 @@ import time
 import socket
 import warnings
 
-# 压制Pandas FutureWarning
+# 压制Pandas的未来警告和弃用警告
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -17,8 +17,9 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # 基础配置
 # ==========================================
 socket.setdefaulttimeout(20)
+
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.7 (零警告版)",
+    page_title="浩哥战法量化终端 v14.7 (零警告零异常版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -31,7 +32,7 @@ with st.sidebar:
         st.success("缓存已清除，请重新运行！")
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Connection': 'close'
 }
 
@@ -90,7 +91,7 @@ def fetch_kline_data(symbol):
     return None
 
 # ==========================================
-# 核心算法（修复所有警告 & ~float bug）
+# 核心算法（严格对齐浩哥原意 + 修复所有警告/异常）
 # ==========================================
 def sma(series, n, m=1):
     return series.ewm(alpha=m/n, adjust=False).mean()
@@ -113,7 +114,7 @@ def calculate_indicators(df):
     # 预初始化所有关键列（防止KeyError）
     init_cols = [
         '拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B',
-        '浩哥王炸', '砖型翻红', '浩哥极缩', '砖型起爆'
+        '浩哥王炸', '砖型翻红', '浩哥极缩', '砖型起爆', 'AA', 'CC'
     ]
     for col in init_cols:
         df[col] = False
@@ -250,7 +251,7 @@ def calculate_indicators(df):
             ((df['J'] < 13) | (df['RSI'] < 18))
         )
 
-        # 砖型图
+        # 砖型图（严格顺序：先AA → 再CC）
         hhv4 = hhv(H, 4)
         llv4 = llv(L, 4)
         range4 = (hhv4 - llv4).replace(0, 0.01)
@@ -262,10 +263,12 @@ def calculate_indicators(df):
         uar6a = uar5a - uar2a
         df['砖型图'] = np.where(uar6a > 4, uar6a - 4, 0)
 
-        # 修复~float bug：先.fillna(False)再.astype(bool)
+        # 先计算 AA
+        df['AA'] = (df['砖型图'] > df['砖型图'].shift(1)).fillna(False).astype(bool)
+
+        # 再计算 CC（修复~float问题）
         aa_shift = df['AA'].shift(1).fillna(False).astype(bool)
-        df['AA'] = df['砖型图'] > df['砖型图'].shift(1)
-        df['CC'] = (~aa_shift) & df['AA'].astype(bool)
+        df['CC'] = (~aa_shift) & df['AA']
         df['砖型起爆'] = df['CC']
 
         df['砖型翻红'] = (df['砖型图'] > 0) & (df['砖型图'].shift(1) == 0)
@@ -282,7 +285,7 @@ def calculate_indicators(df):
     except Exception as e:
         st.warning(f"计算异常，但继续运行: {str(e)[:100]}")
 
-    # ffill/bfill时强制infer_objects，避免FutureWarning
+    # ffill/bfill 时强制类型推断，避免FutureWarning
     df = df.ffill().bfill().infer_objects(copy=False)
     return df
 
@@ -299,7 +302,7 @@ def perform_matrix_backtest(df, current_price):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return None, {}, ["数据不足，无法回测"]
 
-    df_test = df.iloc[-120:-3]
+    df_test = df.iloc[-120:-3]  # 避免未来数据泄露
     strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
 
     tier = 'mid'
@@ -328,7 +331,7 @@ def perform_matrix_backtest(df, current_price):
     return tier, backtest_result, history_report
 
 # ==========================================
-# 评分逻辑
+# 评分逻辑（组合加分）
 # ==========================================
 def analyze_stock_logic(code, info, df):
     if not info or df is None or df['数据不足'].iloc[-1]:
@@ -416,7 +419,7 @@ def analyze_stock_logic(code, info, df):
 # 主程序
 # ==========================================
 st.title("浩哥战法量化终端 v14.7 (零警告零异常版)")
-st.caption("升级：修复~float bug + 压制FutureWarning + 严格缩进 + 信号原意对齐")
+st.caption("核心升级：修复AA/CC计算顺序 + 压制所有警告 + 严格对齐浩哥原意")
 
 codes_input = st.text_area("请输入股票代码（逗号或换行分隔，最多50只）", height=120)
 if st.button("🚀 开始矩阵扫描"):
@@ -467,7 +470,7 @@ if st.button("🚀 开始矩阵扫描"):
                     if '大哥黄线' in df_p.columns:
                         fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
 
-                    # 砖型图
+                    # 砖型图（用numpy array避免索引警告）
                     brick_vals = df_p['砖型图'].fillna(0).values
                     brick_colors = ['gray'] * len(brick_vals)
                     for i in range(1, len(brick_vals)):
@@ -495,6 +498,7 @@ if st.button("🚀 开始矩阵扫描"):
                         paper_bgcolor='#0e1117',
                         font=dict(color='#d1d4dc'),
                         xaxis_rangeslider_visible=False,
-                        showlegend=True
+                        showlegend=True,
+                        width='stretch'  # 替换 use_container_width
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch')
