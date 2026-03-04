@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 socket.setdefaulttimeout(20)
 
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.8 (稳定版)",
+    page_title="浩哥战法量化终端 v14.8 (信号胜率版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -109,14 +109,13 @@ def fetch_kline_data(symbol):
         r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            key = f"{prefix}{symbol}"
             # 处理不同的数据结构
             if isinstance(data.get('data'), list):
                 data = data['data'][0] if data['data'] else {}
             
-            day_data = data.get('data', {}).get(key, {}).get('qfqday', [])
+            day_data = data.get('data', {}).get(f"{prefix}{symbol}", {}).get('qfqday', [])
             if not day_data:
-                day_data = data.get('data', {}).get(key, {}).get('day', [])
+                day_data = data.get('data', {}).get(f"{prefix}{symbol}", {}).get('day', [])
             if day_data and len(day_data) > 0:
                 df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
                 df['date'] = pd.to_datetime(df['date'])
@@ -423,17 +422,8 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 矩阵回测（准确+多数据）
+# 矩阵回测（准确+信号胜率分析）
 # ==========================================
-TIER_MATRIX = {
-    'low_1': {'min': 0, 'max': 5, 'base_score': 45},
-    'low_2': {'min': 5, 'max': 12, 'base_score': 50},
-    'mid_1': {'min': 12, 'max': 25, 'base_score': 65},
-    'mid_2': {'min': 25, 'max': 50, 'base_score': 70},
-    'high_1': {'min': 50, 'max': 100, 'base_score': 60},
-    'high_2': {'min': 100, 'max': 9999, 'base_score': 55}
-}
-
 def perform_matrix_backtest(df, current_price):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return None, {}, ["数据不足，无法回测"]
@@ -449,15 +439,10 @@ def perform_matrix_backtest(df, current_price):
 
     strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
 
-    # 确定价位档
-    tier = 'mid_1'
-    for t_name, t_data in TIER_MATRIX.items():
-        if t_data['min'] <= current_price < t_data['max']:
-            tier = t_name
-            break
-
     backtest_result = {}
     history_report = []
+    
+    # 分析每个信号的胜率
     for sig in strategies:
         if sig not in df_test.columns:
             continue
@@ -465,7 +450,7 @@ def perform_matrix_backtest(df, current_price):
         count = len(triggered)
         if count < 5:
             win_rate = 0
-            history_report.append(f"{sig}: {count}次 (样本不足)")
+            history_report.append(f"{sig}: {count}次 (样本不足，胜率0%)")
         else:
             wins = triggered['收益达标'].sum() if '收益达标' in triggered.columns else 0
             win_rate = (wins / count) * 100
@@ -473,10 +458,35 @@ def perform_matrix_backtest(df, current_price):
         
         backtest_result[sig] = {'count': count, 'win_rate': win_rate}
 
-    return tier, backtest_result, history_report
+    # 分析不同价位档的信号胜率
+    price_tiers = [
+        ('低价股（0-12元）', df_test[df_test['close'] < 12]),
+        ('中价股（12-50元）', df_test[(df_test['close'] >= 12) & (df_test['close'] < 50)]),
+        ('高价股（50元以上）', df_test[df_test['close'] >= 50])
+    ]
+    
+    tier_report = []
+    for tier_name, tier_df in price_tiers:
+        if len(tier_df) < 10:
+            continue
+        tier_report.append(f"\n{tier_name}信号胜率：")
+        for sig in strategies:
+            if sig not in tier_df.columns:
+                continue
+            triggered = tier_df[tier_df[sig] == True]
+            count = len(triggered)
+            if count < 3:
+                tier_report.append(f"  {sig}: {count}次 (样本不足)")
+            else:
+                wins = triggered['收益达标'].sum() if '收益达标' in triggered.columns else 0
+                win_rate = (wins / count) * 100
+                tier_report.append(f"  {sig}: {count}次 (胜率{win_rate:.1f}%)")
+
+    history_report.extend(tier_report)
+    return backtest_result, history_report
 
 # ==========================================
-# 差异化评分逻辑（精细+多维度）
+# 信号胜率为主的评分逻辑
 # ==========================================
 def analyze_stock_logic(code, info, df, market_data, sector_data):
     if not info or df is None or df['数据不足'].iloc[-1]:
@@ -490,20 +500,14 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
     name = info.get('name', code)
     price = info['price']
 
-    tier, bt_result, hist_report = perform_matrix_backtest(df, price)
+    bt_result, hist_report = perform_matrix_backtest(df, price)
 
     score = 0
     score_reason = []
     signals = []
     active_sigs = []
 
-    # 1. 基础分：价位档（40分，细分档位实现差异化）
-    base_score = TIER_MATRIX[tier]['base_score']
-    score += base_score
-    tier_name = tier.replace('_1', '档（0-5元）').replace('_2', '档（5-12元）').replace('mid_1', '档（12-25元）').replace('mid_2', '档（25-50元）').replace('high_1', '档（50-100元）').replace('high_2', '档（100元以上）')
-    score_reason.append(f"价位档：{tier_name}，基础分{base_score}分")
-
-    # 2. 信号胜率分（30分，精细到0.1分）
+    # 1. 信号胜率分（70分，核心评分项）
     signal_score = 0
     best_signal = None
     best_win_rate = 0
@@ -516,30 +520,30 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
                     best_win_rate = wr
                     best_signal = sig
     if best_signal:
-        signal_score = (best_win_rate / 100) * 30
+        signal_score = (best_win_rate / 100) * 70
         score += signal_score
         score_reason.append(f"信号胜率：{best_signal}信号历史胜率{best_win_rate:.1f}%，加{signal_score:.1f}分")
     else:
         score_reason.append(f"无有效信号或样本不足，信号胜率分0分")
 
-    # 3. 组合共振分（10分，精细差异化）
+    # 2. 组合共振分（15分）
     resonance_score = 0
     if last['砖型起爆']:
         active_resonance = [s for s in ['白线B', '黄线B', '超缩量B'] if last.get(s, False)]
         if len(active_resonance) >= 2:
+            resonance_score = 15
+            score += resonance_score
+            score_reason.append(f"组合共振：砖型起爆+{'+'.join(active_resonance)}信号，加15分")
+        elif len(active_resonance) == 1:
             resonance_score = 10
             score += resonance_score
-            score_reason.append(f"组合共振：砖型起爆+{'+'.join(active_resonance)}信号，加10分")
-        elif len(active_resonance) == 1:
-            resonance_score = 7
-            score += resonance_score
-            score_reason.append(f"组合共振：砖型起爆+{active_resonance[0]}信号，加7分")
+            score_reason.append(f"组合共振：砖型起爆+{active_resonance[0]}信号，加10分")
         else:
-            resonance_score = 3
+            resonance_score = 5
             score += resonance_score
-            score_reason.append(f"组合共振：仅砖型起爆信号，加3分")
+            score_reason.append(f"组合共振：仅砖型起爆信号，加5分")
 
-    # 4. 基本面分（5分，多维度差异化）
+    # 3. 基本面分（5分）
     fundamental_score = 0
     if info.get('roe', 0) > 15:
         fundamental_score += 2
@@ -552,7 +556,7 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
         score_reason.append(f"基本面：营收增长率{info['revenue_growth']:.1f}%>20%，加1分")
     score += fundamental_score
 
-    # 5. 大盘盘面分（5分，实时差异化）
+    # 4. 大盘盘面分（5分）
     market_score = 0
     if market_data and market_data['recent_change'] > 0:
         market_score += 3
@@ -562,27 +566,27 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
         score_reason.append(f"大盘盘面：最近5天成交量放大{market_data['volume_growth']:.1f}%，加2分")
     score += market_score
 
-    # 6. 板块信息分（5分，板块差异化）
+    # 5. 板块信息分（3分）
     sector_score = 0
     if sector_data and info.get('sector'):
         if sector_data['sector_change'] > 0:
-            sector_score += 3
-            score_reason.append(f"板块信息：所属{info['sector']}板块最近5天上涨{sector_data['sector_change']:.1f}%，加3分")
-        if sector_data['capital_inflow'] > 0:
             sector_score += 2
-            score_reason.append(f"板块信息：所属{info['sector']}板块资金流入{sector_data['capital_inflow']:.1f}亿，加2分")
+            score_reason.append(f"板块信息：所属{info['sector']}板块最近5天上涨{sector_data['sector_change']:.1f}%，加2分")
+        if sector_data['capital_inflow'] > 0:
+            sector_score += 1
+            score_reason.append(f"板块信息：所属{info['sector']}板块资金流入{sector_data['capital_inflow']:.1f}亿，加1分")
     else:
         score_reason.append("板块信息：无法获取板块数据，加0分")
     score += sector_score
 
-    # 7. 活跃资金分（5分，实时差异化）
+    # 6. 活跃资金分（2分）
     active_capital_score = 0
     if info.get('turnover', 0) > 5:
-        active_capital_score += 2
-        score_reason.append(f"活跃资金：换手率{info['turnover']:.1f}%>5%，加2分")
+        active_capital_score += 1
+        score_reason.append(f"活跃资金：换手率{info['turnover']:.1f}%>5%，加1分")
     if info.get('change', 0) > 0:
-        active_capital_score += 3
-        score_reason.append(f"活跃资金：今日上涨{info['change']:.1f}%，加3分")
+        active_capital_score += 1
+        score_reason.append(f"活跃资金：今日上涨{info['change']:.1f}%，加1分")
     score += active_capital_score
 
     # 总分归一化到0-99分
@@ -601,7 +605,9 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
     comment = f"**{name}** ({code}) 现价: {price:.2f}\n\n"
     comment += f"📊 **总评分**: {score:.1f}分\n"
     comment += f"📡 **触发信号**: {' + '.join(active_sigs) if active_sigs else '无明显信号'}\n"
-    comment += f"⏳ **历史回测**: {' | '.join(hist_report) if hist_report else '样本不足'}\n"
+    comment += f"⏳ **历史回测**:\n"
+    for reason in hist_report:
+        comment += f"- {reason}\n"
     comment += f"📝 **评分理由**:\n"
     for reason in score_reason:
         comment += f"- {reason}\n"
@@ -625,8 +631,8 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
 # ==========================================
 # 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.8 (稳定版)")
-st.caption("修复板块数据接口错误+差异化评分+准确回测")
+st.title("浩哥战法量化终端 v14.8 (信号胜率版)")
+st.caption("信号胜率为主的评分系统+6种B1信号胜率分析+准确回测")
 
 # 获取大盘数据（只获取一次，提高速度）
 market_data = get_market_data()
