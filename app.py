@@ -32,7 +32,7 @@ with st.sidebar:
         st.success("缓存已清除，请重新运行！")
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Connection': 'close'
 }
 
@@ -56,15 +56,15 @@ def get_realtime_data(symbol):
             return {
                 'name': parts[1],
                 'code': code,
-                'price': float(parts[3]),
-                'turnover': float(parts[38]) if parts[38] else 0,
-                'pe': float(parts[39]) if parts[39] else 0,
-                'pb': float(parts[46]) if parts[46] else 0,
-                'mkt_cap': float(parts[45]) if parts[45] else 0,
-                'change': float(parts[32]) if parts[32] else 0
+                'price': float(parts[3]) if parts[3] and parts[3] != '' else 0,
+                'turnover': float(parts[38]) if parts[38] and parts[38] != '' else 0,
+                'pe': float(parts[39]) if parts[39] and parts[39] != '' else 0,
+                'pb': float(parts[46]) if parts[46] and parts[46] != '' else 0,
+                'mkt_cap': float(parts[45]) if parts[45] and parts[45] != '' else 0,
+                'change': float(parts[32]) if parts[32] and parts[32] != '' else 0
             }
-    except:
-        pass
+    except Exception as e:
+        st.warning(f"获取实时数据失败 {symbol}: {str(e)[:50]}")
     return None
 
 @st.cache_data(ttl=3600)
@@ -80,14 +80,16 @@ def fetch_kline_data(symbol):
             day_data = data.get('data', {}).get(key, {}).get('qfqday', [])
             if not day_data:
                 day_data = data.get('data', {}).get(key, {}).get('day', [])
-            if day_data:
+            if day_data and len(day_data) > 0:
                 df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
-                df = df.apply(pd.to_numeric, errors='coerce')
+                # 安全转换数值类型，处理空值
+                for col in ['open', 'close', 'high', 'low', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                 return calculate_indicators(df)
-    except:
-        pass
+    except Exception as e:
+        st.warning(f"获取K线数据失败 {symbol}: {str(e)[:50]}")
     return None
 
 # ==========================================
@@ -97,10 +99,10 @@ def sma(series, n, m=1):
     return series.ewm(alpha=m/n, adjust=False).mean()
 
 def hhv(series, n):
-    return series.rolling(n).max()
+    return series.rolling(n, min_periods=1).max()
 
 def llv(series, n):
-    return series.rolling(n).min()
+    return series.rolling(n, min_periods=1).min()
 
 def calculate_indicators(df):
     if df is None or len(df) < 60:
@@ -114,7 +116,8 @@ def calculate_indicators(df):
     # 预初始化所有关键列（防止KeyError）
     init_cols = [
         '拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B',
-        '浩哥王炸', '砖型翻红', '浩哥极缩', '砖型起爆', 'AA', 'CC'
+        '浩哥王炸', '砖型翻红', '浩哥极缩', '砖型起爆', 'AA', 'CC',
+        '收益达标'  # 新增：用于回测的收益达标列
     ]
     for col in init_cols:
         df[col] = False
@@ -123,6 +126,7 @@ def calculate_indicators(df):
     df['大哥黄线'] = np.nan
     df['止损价'] = np.nan
     df['目标价'] = np.nan
+    df['砖型图'] = 0
 
     try:
         C = df['close']
@@ -153,6 +157,8 @@ def calculate_indicators(df):
         # KDJ
         low9 = llv(L, 9)
         high9 = hhv(H, 9)
+        # 防止除零错误
+        high9 = np.where(high9 == low9, low9 + 0.001, high9)
         rsv = (C - low9) / (high9 - low9) * 100
         df['K'] = sma(rsv, 3, 1)
         df['D'] = sma(df['K'], 3, 1)
@@ -164,6 +170,8 @@ def calculate_indicators(df):
         down = -delta.clip(upper=0)
         ema_up = up.ewm(com=13, adjust=False).mean()
         ema_down = down.ewm(com=13, adjust=False).mean()
+        # 防止除零错误
+        ema_down = np.where(ema_down == 0, 0.001, ema_down)
         rs = ema_up / ema_down
         df['RSI'] = 100 - (100 / (1 + rs))
 
@@ -282,6 +290,16 @@ def calculate_indicators(df):
         df['止损价'] = df['技术支撑'] * 0.97
         df['目标价'] = df['high'].rolling(20).max() * 1.15
 
+        # 计算收益达标（修复回测时的KeyError）
+        # 定义：信号出现后5天内收盘价超过目标价即为达标
+        df['收益达标'] = False
+        for i in range(len(df)-5):
+            if any([df.iloc[i][sig] for sig in ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']]):
+                # 检查未来5天是否达到目标价
+                future_close = df.iloc[i+1:i+6]['close']
+                if future_close.max() >= df.iloc[i]['目标价']:
+                    df.iloc[i, df.columns.get_loc('收益达标')] = True
+
     except Exception as e:
         st.warning(f"计算异常，但继续运行: {str(e)[:100]}")
 
@@ -301,7 +319,16 @@ def perform_matrix_backtest(df, current_price):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return None, {}, ["数据不足，无法回测"]
 
-    df_test = df.iloc[-120:-3]
+    # 修复：确保有足够的回测数据
+    if len(df) < 120:
+        df_test = df.iloc[:-3] if len(df) > 3 else df
+    else:
+        df_test = df.iloc[-120:-3]
+    
+    # 修复：如果测试数据为空，返回样本不足
+    if len(df_test) < 10:
+        return None, {}, ["样本不足（少于10条），无法回测"]
+
     strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
 
     tier = 'mid'
@@ -319,13 +346,13 @@ def perform_matrix_backtest(df, current_price):
         count = len(triggered)
         if count < 5:
             win_rate = 0
+            history_report.append(f"{sig}: {count}次 (样本不足)")
         else:
             wins = triggered['收益达标'].sum() if '收益达标' in triggered.columns else 0
             win_rate = (wins / count) * 100
-
-        backtest_result[sig] = {'count': count, 'win_rate': win_rate}
-        if count >= 5:
             history_report.append(f"{sig}: {count}次 (胜率{win_rate:.0f}%)")
+        
+        backtest_result[sig] = {'count': count, 'win_rate': win_rate}
 
     return tier, backtest_result, history_report
 
@@ -418,7 +445,7 @@ def analyze_stock_logic(code, info, df):
 # 主程序
 # ==========================================
 st.title("浩哥战法量化终端 v14.8 (稳定版)")
-st.caption("修复：AA/CC顺序 + ~float防护 + 绘图兼容 + 所有警告压制")
+st.caption("修复：AA/CC顺序 + ~float防护 + 绘图兼容 + 所有警告压制 + 收益达标列 + 除零防护")
 
 codes_input = st.text_area("请输入股票代码（逗号或换行分隔，最多50只）", height=120)
 if st.button("🚀 开始矩阵扫描"):
@@ -434,7 +461,7 @@ if st.button("🚀 开始矩阵扫描"):
         for i, code in enumerate(codes):
             info = get_realtime_data(code)
             df = fetch_kline_data(code)
-            if df is not None:
+            if df is not None and info is not None:  # 修复：确保info不为空
                 res = analyze_stock_logic(code, info, df)
                 if res:
                     results.append(res)
@@ -462,40 +489,84 @@ if st.button("🚀 开始矩阵扫描"):
                     df_p = res['df'].iloc[-100:]
                     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.25, 0.20])
 
-                    fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['open'], high=df_p['high'], low=df_p['low'], close=df_p['close'], name='K线'), row=1, col=1)
-                    if '趋势白线' in df_p.columns:
-                        fig.add_trace(go.Scatter(x=df_p.index, y=df_p['趋势白线'], line=dict(color='white', width=1.2), name='趋势白线'), row=1, col=1)
-                    if '大哥黄线' in df_p.columns:
-                        fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
+                    # K线图
+                    fig.add_trace(go.Candlestick(
+                        x=df_p.index, 
+                        open=df_p['open'], 
+                        high=df_p['high'], 
+                        low=df_p['low'], 
+                        close=df_p['close'], 
+                        name='K线'
+                    ), row=1, col=1)
+                    
+                    # 趋势线
+                    if '趋势白线' in df_p.columns and not df_p['趋势白线'].isna().all():
+                        fig.add_trace(go.Scatter(
+                            x=df_p.index, 
+                            y=df_p['趋势白线'], 
+                            line=dict(color='white', width=1.2), 
+                            name='趋势白线'
+                        ), row=1, col=1)
+                    if '大哥黄线' in df_p.columns and not df_p['大哥黄线'].isna().all():
+                        fig.add_trace(go.Scatter(
+                            x=df_p.index, 
+                            y=df_p['大哥黄线'], 
+                            line=dict(color='yellow', width=1.5), 
+                            name='大哥黄线'
+                        ), row=1, col=1)
 
                     # 砖型图
                     brick_vals = df_p['砖型图'].fillna(0).values
-                    brick_colors = ['gray'] * len(brick_vals)
-                    for i in range(1, len(brick_vals)):
-                        if brick_vals[i] > 0 and brick_vals[i] >= brick_vals[i-1]:
-                            brick_colors[i] = '#ff3333'
+                    brick_colors = []
+                    for i in range(len(brick_vals)):
+                        if i == 0:
+                            brick_colors.append('gray')
                         else:
-                            brick_colors[i] = '#33ff33'
+                            if brick_vals[i] > 0 and brick_vals[i] >= brick_vals[i-1]:
+                                brick_colors.append('#ff3333')  # 红
+                            else:
+                                brick_colors.append('#33ff33')  # 绿
 
-                    fig.add_trace(go.Bar(x=df_p.index, y=brick_vals, marker_color=brick_colors, name='浩哥砖型图'), row=2, col=1)
+                    fig.add_trace(go.Bar(
+                        x=df_p.index, 
+                        y=brick_vals, 
+                        marker_color=brick_colors, 
+                        name='浩哥砖型图'
+                    ), row=2, col=1)
 
                     # 标记起爆点
                     if '砖型起爆' in df_p.columns:
                         起爆 = df_p[df_p['砖型起爆']]
                         if not 起爆.empty:
-                            fig.add_trace(go.Scatter(x=起爆.index, y=起爆['砖型图']*1.1, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold'), name='砖型起爆'), row=2, col=1)
+                            fig.add_trace(go.Scatter(
+                                x=起爆.index, 
+                                y=起爆['砖型图']*1.1, 
+                                mode='markers', 
+                                marker=dict(symbol='triangle-up', size=12, color='gold'), 
+                                name='砖型起爆'
+                            ), row=2, col=1)
 
                     # 成交量
                     vol_colors = ['#00aaff' if r['浩哥极缩'] else 'gray' for _, r in df_p.iterrows()]
-                    fig.add_trace(go.Bar(x=df_p.index, y=df_p['volume'], marker_color=vol_colors, name='成交量'), row=3, col=1)
+                    fig.add_trace(go.Bar(
+                        x=df_p.index, 
+                        y=df_p['volume'], 
+                        marker_color=vol_colors, 
+                        name='成交量'
+                    ), row=3, col=1)
 
+                    # 图表样式配置
                     fig.update_layout(
                         height=700,
-                        margin=dict(l=0,r=0,t=30,b=0),
+                        margin=dict(l=0, r=0, t=30, b=0),
                         plot_bgcolor='#0e1117',
                         paper_bgcolor='#0e1117',
                         font=dict(color='#d1d4dc'),
                         xaxis_rangeslider_visible=False,
                         showlegend=True
                     )
+                    
+                    # 修复：设置y轴范围，防止砖型图显示异常
+                    fig.update_yaxes(range=[0, max(df_p['砖型图'].max() * 1.2, 1)], row=2, col=1)
+                    
                     st.plotly_chart(fig, use_container_width=True)
