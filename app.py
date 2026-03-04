@@ -8,6 +8,7 @@ import re
 import time
 import socket
 import warnings
+from bs4 import BeautifulSoup
 
 # 压制Pandas未来警告和弃用警告
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -19,7 +20,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 socket.setdefaulttimeout(20)
 
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.8 (稳定版)",
+    page_title="浩哥战法量化终端 v14.8 (差异化版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -37,13 +38,31 @@ HEADERS = {
 }
 
 # ==========================================
-# 数据引擎
+# 多维度数据引擎（准确+全面）
 # ==========================================
 def get_realtime_data(symbol):
     symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith(('6', '9')) else 'sz'
     code = f"{prefix}{symbol}"
     try:
+        # 1. 从东方财富网获取基本面数据
+        url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code={symbol}"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.encoding = 'utf-8'
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # 提取基本面数据
+        roe = 0
+        gross_margin = 0
+        revenue_growth = 0
+        try:
+            roe = float(soup.find('td', text='净资产收益率').find_next_sibling('td').text.replace('%', ''))
+            gross_margin = float(soup.find('td', text='毛利率').find_next_sibling('td').text.replace('%', ''))
+            revenue_growth = float(soup.find('td', text='营业收入同比增长').find_next_sibling('td').text.replace('%', ''))
+        except:
+            pass
+
+        # 2. 从腾讯财经获取实时行情数据
         url = f"http://qt.gtimg.cn/q={code}"
         r = requests.get(url, headers=HEADERS, timeout=10)
         r.encoding = 'gbk'
@@ -60,6 +79,9 @@ def get_realtime_data(symbol):
                 'turnover': float(parts[38]) if parts[38] and parts[38] != '' else 0,
                 'pe': float(parts[39]) if parts[39] and parts[39] != '' else 0,
                 'pb': float(parts[46]) if parts[46] and parts[46] != '' else 0,
+                'roe': roe,
+                'gross_margin': gross_margin,
+                'revenue_growth': revenue_growth,
                 'mkt_cap': float(parts[45]) if parts[45] and parts[45] != '' else 0,
                 'change': float(parts[32]) if parts[32] and parts[32] != '' else 0
             }
@@ -72,7 +94,8 @@ def fetch_kline_data(symbol):
     symbol = str(symbol).strip()
     prefix = 'sh' if symbol.startswith('6') else 'sz'
     try:
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,360,qfq"
+        # 使用前复权数据确保回测准确性，获取最近300天数据
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{symbol},day,,,300,qfq"
         r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             data = r.json()
@@ -92,8 +115,74 @@ def fetch_kline_data(symbol):
         st.warning(f"获取K线数据失败 {symbol}: {str(e)[:50]}")
     return None
 
+@st.cache_data(ttl=3600)
+def get_market_data():
+    try:
+        # 获取上证指数最近30天数据
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,30,qfq"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            day_data = data.get('data', {}).get('sh000001', {}).get('qfqday', [])
+            if day_data and len(day_data) > 0:
+                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                for col in ['open', 'close', 'high', 'low', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                # 计算大盘最近5天涨幅
+                recent_change = df['close'].pct_change().tail(5).sum() * 100
+                # 计算大盘成交量变化（最近5天vs前5天）
+                recent_volume = df['volume'].tail(5).mean()
+                prev_volume = df['volume'].tail(10).head(5).mean()
+                volume_growth = (recent_volume - prev_volume) / prev_volume * 100 if prev_volume != 0 else 0
+                return {
+                    'recent_change': recent_change,
+                    'volume_growth': volume_growth
+                }
+    except Exception as e:
+        st.warning(f"获取大盘数据失败: {str(e)[:50]}")
+    return None
+
+@st.cache_data(ttl=3600)
+def get_sector_data(symbol):
+    symbol = str(symbol).strip()
+    try:
+        # 获取股票所属板块
+        url = f"https://data.eastmoney.com/stockdata/{symbol}.html"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.encoding = 'utf-8'
+        soup = BeautifulSoup(r.text, 'html.parser')
+        sector = soup.find('div', class_='stock-bets').find('a', href=re.compile('/concept/')).text
+        
+        # 获取板块最近10天数据
+        sector_code = re.findall(r'/concept/(.*?).html', soup.find('a', href=re.compile('/concept/'))['href'])[0]
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sector_code},day,,,10,qfq"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            day_data = data.get('data', {}).get(sector_code, {}).get('qfqday', [])
+            if day_data and len(day_data) > 0:
+                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                for col in ['open', 'close', 'high', 'low', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                # 计算板块最近5天涨幅
+                sector_change = df['close'].pct_change().tail(5).sum() * 100
+                # 计算板块资金流入（简化计算）
+                capital_inflow = (df['close'].iloc[-1] - df['close'].iloc[-6]) * df['volume'].tail(5).mean() / 100000000
+                return {
+                    'sector': sector,
+                    'sector_change': sector_change,
+                    'capital_inflow': capital_inflow
+                }
+    except Exception as e:
+        st.warning(f"获取板块数据失败 {symbol}: {str(e)[:50]}")
+    return None
+
 # ==========================================
-# 核心算法（顺序修复 + 防AA KeyError + 防~float）
+# 核心算法（准确回测+精细指标）
 # ==========================================
 def sma(series, n, m=1):
     return series.ewm(alpha=m/n, adjust=False).mean()
@@ -113,11 +202,11 @@ def calculate_indicators(df):
     df = df.copy()
     df['数据不足'] = False
 
-    # 预初始化所有关键列（防止KeyError）
+    # 预初始化所有关键列
     init_cols = [
         '拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B',
         '浩哥王炸', '砖型翻红', '浩哥极缩', '砖型起爆', 'AA', 'CC',
-        '收益达标'  # 新增：用于回测的收益达标列
+        '收益达标'
     ]
     for col in init_cols:
         df[col] = False
@@ -157,7 +246,6 @@ def calculate_indicators(df):
         # KDJ
         low9 = llv(L, 9)
         high9 = hhv(H, 9)
-        # 防止除零错误
         high9 = np.where(high9 == low9, low9 + 0.001, high9)
         rsv = (C - low9) / (high9 - low9) * 100
         df['K'] = sma(rsv, 3, 1)
@@ -170,7 +258,6 @@ def calculate_indicators(df):
         down = -delta.clip(upper=0)
         ema_up = up.ewm(com=13, adjust=False).mean()
         ema_down = down.ewm(com=13, adjust=False).mean()
-        # 防止除零错误
         ema_down = np.where(ema_down == 0, 0.001, ema_down)
         rs = ema_up / ema_down
         df['RSI'] = 100 - (100 / (1 + rs))
@@ -259,7 +346,7 @@ def calculate_indicators(df):
             ((df['J'] < 13) | (df['RSI'] < 18))
         )
 
-        # 砖型图 - 严格顺序
+        # 砖型图
         hhv4 = hhv(H, 4)
         llv4 = llv(L, 4)
         range4 = (hhv4 - llv4).replace(0, 0.01)
@@ -279,26 +366,24 @@ def calculate_indicators(df):
         df['CC'] = (~aa_shift) & df['AA']
         df['砖型起爆'] = df['CC']
 
-        df['砖型翻红'] = (df['砖型图'] > 0) & (df['砖型图'].shift(1) == 0)
+        df['砖型翻红'] = (df['砖型图'] > 0) & (df['砖型图'].shift(1) <= 0)
 
         # 组合信号
         df['浩哥极缩'] = df['超缩量B'] | (df['缩量B'] & (df['当日振幅'] < 6))
         df['浩哥王炸'] = df['浩哥极缩'] & df['砖型起爆'] & (df['回踩白线'] | df['回踩黄线'])
 
-        # 止损 & 目标
+        # 止损 & 目标价
         df['技术支撑'] = df[['MA20', '大哥黄线', '趋势白线']].min(axis=1)
         df['止损价'] = df['技术支撑'] * 0.97
         df['目标价'] = df['high'].rolling(20).max() * 1.15
 
-        # 计算收益达标（修复回测时的KeyError）
-        # 定义：信号出现后5天内收盘价超过目标价即为达标
-        df['收益达标'] = False
-        for i in range(len(df)-5):
-            if any([df.iloc[i][sig] for sig in ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']]):
-                # 检查未来5天是否达到目标价
-                future_close = df.iloc[i+1:i+6]['close']
-                if future_close.max() >= df.iloc[i]['目标价']:
-                    df.iloc[i, df.columns.get_loc('收益达标')] = True
+        # 准确回测：向量化计算收益达标（提高速度）
+        # 信号出现的位置
+        signal_mask = df[['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']].any(axis=1)
+        # 未来10天的最高价
+        future_high = df['high'].rolling(10).max().shift(-10)
+        # 收益达标：未来10天最高价 >= 目标价
+        df['收益达标'] = signal_mask & (future_high >= df['目标价'])
 
     except Exception as e:
         st.warning(f"计算异常，但继续运行: {str(e)[:100]}")
@@ -307,31 +392,34 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 矩阵回测
+# 矩阵回测（准确+多数据）
 # ==========================================
 TIER_MATRIX = {
-    'low': {'min': 0, 'max': 12, 'base_score': 50},
-    'mid': {'min': 12, 'max': 50, 'base_score': 70},
-    'high': {'min': 50, 'max': 9999, 'base_score': 60}
+    'low_1': {'min': 0, 'max': 5, 'base_score': 45},
+    'low_2': {'min': 5, 'max': 12, 'base_score': 50},
+    'mid_1': {'min': 12, 'max': 25, 'base_score': 65},
+    'mid_2': {'min': 25, 'max': 50, 'base_score': 70},
+    'high_1': {'min': 50, 'max': 100, 'base_score': 60},
+    'high_2': {'min': 100, 'max': 9999, 'base_score': 55}
 }
 
 def perform_matrix_backtest(df, current_price):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return None, {}, ["数据不足，无法回测"]
 
-    # 修复：确保有足够的回测数据
-    if len(df) < 120:
-        df_test = df.iloc[:-3] if len(df) > 3 else df
+    # 准确回测：使用最近300天数据，排除最近5天未完成数据
+    if len(df) < 300:
+        df_test = df.iloc[:-5] if len(df) > 5 else df
     else:
-        df_test = df.iloc[-120:-3]
+        df_test = df.iloc[-300:-5]
     
-    # 修复：如果测试数据为空，返回样本不足
-    if len(df_test) < 10:
-        return None, {}, ["样本不足（少于10条），无法回测"]
+    if len(df_test) < 20:
+        return None, {}, ["样本不足（少于20条），无法回测"]
 
     strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
 
-    tier = 'mid'
+    # 确定价位档
+    tier = 'mid_1'
     for t_name, t_data in TIER_MATRIX.items():
         if t_data['min'] <= current_price < t_data['max']:
             tier = t_name
@@ -350,21 +438,21 @@ def perform_matrix_backtest(df, current_price):
         else:
             wins = triggered['收益达标'].sum() if '收益达标' in triggered.columns else 0
             win_rate = (wins / count) * 100
-            history_report.append(f"{sig}: {count}次 (胜率{win_rate:.0f}%)")
+            history_report.append(f"{sig}: {count}次 (胜率{win_rate:.1f}%)")
         
         backtest_result[sig] = {'count': count, 'win_rate': win_rate}
 
     return tier, backtest_result, history_report
 
 # ==========================================
-# 评分逻辑
+# 差异化评分逻辑（精细+多维度）
 # ==========================================
-def analyze_stock_logic(code, info, df):
+def analyze_stock_logic(code, info, df, market_data, sector_data):
     if not info or df is None or df['数据不足'].iloc[-1]:
         return {
             'code': code, 'name': code, 'score': 0,
             'comment': "数据不足或获取失败", 'advice': "跳过", 'df': None,
-            'has_signal': False
+            'has_signal': False, 'score_reason': []
         }
 
     last = df.iloc[-1]
@@ -374,57 +462,115 @@ def analyze_stock_logic(code, info, df):
     tier, bt_result, hist_report = perform_matrix_backtest(df, price)
 
     score = 0
+    score_reason = []
     signals = []
     active_sigs = []
 
-    if last['砖型起爆']:
-        score = 88
-        signals.append("🧱 砖型起爆（主升确认）")
-        active_sigs.append('砖型起爆')
+    # 1. 基础分：价位档（40分，细分档位实现差异化）
+    base_score = TIER_MATRIX[tier]['base_score']
+    score += base_score
+    tier_name = tier.replace('_1', '档（0-5元）').replace('_2', '档（5-12元）').replace('mid_1', '档（12-25元）').replace('mid_2', '档（25-50元）').replace('high_1', '档（50-100元）').replace('high_2', '档（100元以上）')
+    score_reason.append(f"价位档：{tier_name}，基础分{base_score}分")
 
-    if last['浩哥王炸']:
-        score = 95
-        signals.insert(0, "👑 浩哥王炸（极缩+砖型+回踩）")
-        active_sigs.append('浩哥王炸')
-
+    # 2. 信号胜率分（30分，精细到0.1分）
+    signal_score = 0
+    best_signal = None
+    best_win_rate = 0
     for sig in ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']:
         if last.get(sig, False):
             active_sigs.append(sig)
-            base = 60 if tier == 'mid' else 50 if tier == 'low' else 55
             if sig in bt_result and bt_result[sig]['count'] >= 5:
                 wr = bt_result[sig]['win_rate']
-                if wr >= 65:
-                    base += 20
-                    signals.append(f"{sig} (历史胜率{wr:.0f}%🔥)")
-                elif wr >= 55:
-                    base += 10
-                    signals.append(f"{sig} (历史胜率{wr:.0f}%)")
-                else:
-                    base -= 10
-                    signals.append(f"{sig} (历史胜率{wr:.0f}%⚠️)")
-            else:
-                base += 5
-                signals.append(f"{sig} (新信号)")
-            score = max(score, base)
+                if wr > best_win_rate:
+                    best_win_rate = wr
+                    best_signal = sig
+    if best_signal:
+        signal_score = (best_win_rate / 100) * 30
+        score += signal_score
+        score_reason.append(f"信号胜率：{best_signal}信号历史胜率{best_win_rate:.1f}%，加{signal_score:.1f}分")
+    else:
+        score_reason.append(f"无有效信号或样本不足，信号胜率分0分")
 
-    if last['砖型起爆'] and any(last.get(s, False) for s in ['白线B', '黄线B', '超缩量B']):
-        score += 15
-        signals.append("组合共振 +15分")
+    # 3. 组合共振分（10分，精细差异化）
+    resonance_score = 0
+    if last['砖型起爆']:
+        active_resonance = [s for s in ['白线B', '黄线B', '超缩量B'] if last.get(s, False)]
+        if len(active_resonance) >= 2:
+            resonance_score = 10
+            score += resonance_score
+            score_reason.append(f"组合共振：砖型起爆+{'+'.join(active_resonance)}信号，加10分")
+        elif len(active_resonance) == 1:
+            resonance_score = 7
+            score += resonance_score
+            score_reason.append(f"组合共振：砖型起爆+{active_resonance[0]}信号，加7分")
+        else:
+            resonance_score = 3
+            score += resonance_score
+            score_reason.append(f"组合共振：仅砖型起爆信号，加3分")
 
-    if 0 < info['pe'] < 35: score += 5
-    if info['pb'] < 2.0: score += 5
+    # 4. 基本面分（5分，多维度差异化）
+    fundamental_score = 0
+    if info.get('roe', 0) > 15:
+        fundamental_score += 2
+        score_reason.append(f"基本面：ROE{info['roe']:.1f}%>15%，加2分")
+    if info.get('gross_margin', 0) > 30:
+        fundamental_score += 2
+        score_reason.append(f"基本面：毛利率{info['gross_margin']:.1f}%>30%，加2分")
+    if info.get('revenue_growth', 0) > 20:
+        fundamental_score += 1
+        score_reason.append(f"基本面：营收增长率{info['revenue_growth']:.1f}%>20%，加1分")
+    score += fundamental_score
 
+    # 5. 大盘盘面分（5分，实时差异化）
+    market_score = 0
+    if market_data and market_data['recent_change'] > 0:
+        market_score += 3
+        score_reason.append(f"大盘盘面：最近5天上涨{market_data['recent_change']:.1f}%，加3分")
+    if market_data and market_data['volume_growth'] > 10:
+        market_score += 2
+        score_reason.append(f"大盘盘面：最近5天成交量放大{market_data['volume_growth']:.1f}%，加2分")
+    score += market_score
+
+    # 6. 板块信息分（5分，板块差异化）
+    sector_score = 0
+    if sector_data and sector_data['sector_change'] > 0:
+        sector_score += 3
+        score_reason.append(f"板块信息：所属{sector_data['sector']}板块最近5天上涨{sector_data['sector_change']:.1f}%，加3分")
+    if sector_data and sector_data['capital_inflow'] > 0:
+        sector_score += 2
+        score_reason.append(f"板块信息：所属{sector_data['sector']}板块资金流入{sector_data['capital_inflow']:.1f}亿，加2分")
+    score += sector_score
+
+    # 7. 活跃资金分（5分，实时差异化）
+    active_capital_score = 0
+    if info.get('turnover', 0) > 5:
+        active_capital_score += 2
+        score_reason.append(f"活跃资金：换手率{info['turnover']:.1f}%>5%，加2分")
+    if info.get('change', 0) > 0:
+        active_capital_score += 3
+        score_reason.append(f"活跃资金：今日上涨{info['change']:.1f}%，加3分")
+    score += active_capital_score
+
+    # 总分归一化到0-99分
     score = min(99, max(0, score))
 
+    # 建议等级
     advice = "观望"
-    if score >= 90: advice = "S级买点（强烈推荐）"
-    elif score >= 80: advice = "A级买点（重点关注）"
-    elif score >= 65: advice = "B级买点（谨慎布局）"
+    if score >= 90:
+        advice = "S级买点（强烈推荐）"
+    elif score >= 80:
+        advice = "A级买点（重点关注）"
+    elif score >= 65:
+        advice = "B级买点（谨慎布局）"
 
+    # 详细评论
     comment = f"**{name}** ({code}) 现价: {price:.2f}\n\n"
-    comment += f"📊 **价位档**: {tier}\n"
-    comment += f"📡 **触发信号**: {' + '.join(signals) if signals else '无明显信号'}\n"
+    comment += f"📊 **总评分**: {score:.1f}分\n"
+    comment += f"📡 **触发信号**: {' + '.join(active_sigs) if active_sigs else '无明显信号'}\n"
     comment += f"⏳ **历史回测**: {' | '.join(hist_report) if hist_report else '样本不足'}\n"
+    comment += f"📝 **评分理由**:\n"
+    for reason in score_reason:
+        comment += f"- {reason}\n"
 
     if not np.isnan(last['止损价']):
         comment += f"\n🛡️ **建议止损**: {last['止损价']:.2f}（技术支撑-3%）"
@@ -438,14 +584,18 @@ def analyze_stock_logic(code, info, df):
         'comment': comment,
         'advice': advice,
         'df': df,
-        'has_signal': len(active_sigs) > 0
+        'has_signal': len(active_sigs) > 0,
+        'score_reason': score_reason
     }
 
 # ==========================================
 # 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.8 (稳定版)")
-st.caption("修复：AA/CC顺序 + ~float防护 + 绘图兼容 + 所有警告压制 + 收益达标列 + 除零防护")
+st.title("浩哥战法量化终端 v14.8 (差异化精细版)")
+st.caption("差异化评分+准确回测：多维度精细评分+300天回测数据+全面维度分析")
+
+# 获取大盘数据（只获取一次，提高速度）
+market_data = get_market_data()
 
 codes_input = st.text_area("请输入股票代码（逗号或换行分隔，最多50只）", height=120)
 if st.button("🚀 开始矩阵扫描"):
@@ -461,19 +611,22 @@ if st.button("🚀 开始矩阵扫描"):
         for i, code in enumerate(codes):
             info = get_realtime_data(code)
             df = fetch_kline_data(code)
-            if df is not None and info is not None:  # 修复：确保info不为空
-                res = analyze_stock_logic(code, info, df)
+            sector_data = get_sector_data(code)
+            if df is not None and info is not None:
+                res = analyze_stock_logic(code, info, df, market_data, sector_data)
                 if res:
                     results.append(res)
             bar.progress((i + 1) / len(codes))
             time.sleep(0.1)  # 防限流
 
+        # 按评分排序
         results.sort(key=lambda x: x['score'], reverse=True)
         st.success(f"扫描完成！共 {len(results)} 只有效票")
 
+        # 显示结果
         for res in results:
             prefix = "👑 " if res['score'] >= 90 else "🔥 " if res['score'] >= 80 else ""
-            with st.expander(f"{prefix}{res['name']} ({res['code']}) - {res['score']:.0f}分", expanded=res['score'] >= 80):
+            with st.expander(f"{prefix}{res['name']} ({res['code']}) - {res['score']:.1f}分", expanded=res['score'] >= 80):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(res['comment'])
@@ -485,6 +638,7 @@ if st.button("🚀 开始矩阵扫描"):
                     else:
                         st.info(res['advice'])
 
+                # 绘制图表
                 if res['df'] is not None and len(res['df']) > 20:
                     df_p = res['df'].iloc[-100:]
                     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.25, 0.20])
@@ -566,7 +720,6 @@ if st.button("🚀 开始矩阵扫描"):
                         showlegend=True
                     )
                     
-                    # 修复：设置y轴范围，防止砖型图显示异常
                     fig.update_yaxes(range=[0, max(df_p['砖型图'].max() * 1.2, 1)], row=2, col=1)
                     
                     st.plotly_chart(fig, use_container_width=True)
