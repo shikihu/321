@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 socket.setdefaulttimeout(20)
 
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.8 (修复版)",
+    page_title="浩哥战法量化终端 v14.8 (稳定版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -110,6 +110,10 @@ def fetch_kline_data(symbol):
         if r.status_code == 200:
             data = r.json()
             key = f"{prefix}{symbol}"
+            # 处理不同的数据结构
+            if isinstance(data.get('data'), list):
+                data = data['data'][0] if data['data'] else {}
+            
             day_data = data.get('data', {}).get(key, {}).get('qfqday', [])
             if not day_data:
                 day_data = data.get('data', {}).get(key, {}).get('day', [])
@@ -133,7 +137,13 @@ def get_market_data():
         r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             data = r.json()
+            # 处理不同的数据结构
+            if isinstance(data.get('data'), list):
+                data = data['data'][0] if data['data'] else {}
+            
             day_data = data.get('data', {}).get('sh000001', {}).get('qfqday', [])
+            if not day_data:
+                day_data = data.get('data', {}).get('sh000001', {}).get('day', [])
             if day_data and len(day_data) > 0:
                 df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
                 df['date'] = pd.to_datetime(df['date'])
@@ -160,6 +170,10 @@ def get_sector_data(symbol, sector_code):
         if not sector_code:
             return None
             
+        # 腾讯财经的板块代码需要加concept_前缀
+        if not sector_code.startswith('concept_'):
+            sector_code = f'concept_{sector_code}'
+            
         # 获取板块最近10天数据
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sector_code},day,,,10,qfq"
         r = requests.get(url, headers=HEADERS, timeout=10)
@@ -167,7 +181,15 @@ def get_sector_data(symbol, sector_code):
             return None
         
         data = r.json()
-        day_data = data.get('data', {}).get(sector_code, {}).get('qfqday', [])
+        # 处理腾讯财经返回的列表格式数据
+        if isinstance(data.get('data'), list):
+            data = data['data'][0] if data['data'] else {}
+        
+        # 获取板块K线数据，兼容不同的接口结构
+        sector_data = data.get('data', {}).get(sector_code, {})
+        day_data = sector_data.get('qfqday', [])
+        if not day_data:
+            day_data = sector_data.get('day', [])
         if not day_data:
             return None
         
@@ -187,7 +209,7 @@ def get_sector_data(symbol, sector_code):
             'capital_inflow': capital_inflow
         }
     except Exception as e:
-        st.warning(f"获取板块数据失败 {symbol}: {str(e)[:50]}")
+        st.warning(f"获取板块数据失败 {symbol}: {str(e)[:100]}")
     return None
 
 # ==========================================
@@ -603,8 +625,8 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
 # ==========================================
 # 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.8 (修复版)")
-st.caption("修复板块数据获取错误+差异化评分+准确回测")
+st.title("浩哥战法量化终端 v14.8 (稳定版)")
+st.caption("修复板块数据接口错误+差异化评分+准确回测")
 
 # 获取大盘数据（只获取一次，提高速度）
 market_data = get_market_data()
