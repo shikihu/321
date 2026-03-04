@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 socket.setdefaulttimeout(20)
 
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.8 (差异化版)",
+    page_title="浩哥战法量化终端 v14.8 (修复版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -38,7 +38,7 @@ HEADERS = {
 }
 
 # ==========================================
-# 多维度数据引擎（准确+全面）
+# 多维度数据引擎（稳定+准确）
 # ==========================================
 def get_realtime_data(symbol):
     symbol = str(symbol).strip()
@@ -56,11 +56,19 @@ def get_realtime_data(symbol):
         gross_margin = 0
         revenue_growth = 0
         try:
-            roe = float(soup.find('td', text='净资产收益率').find_next_sibling('td').text.replace('%', ''))
-            gross_margin = float(soup.find('td', text='毛利率').find_next_sibling('td').text.replace('%', ''))
-            revenue_growth = float(soup.find('td', text='营业收入同比增长').find_next_sibling('td').text.replace('%', ''))
-        except:
-            pass
+            roe_td = soup.find('td', text='净资产收益率')
+            if roe_td:
+                roe = float(roe_td.find_next_sibling('td').text.replace('%', ''))
+            
+            gross_margin_td = soup.find('td', text='毛利率')
+            if gross_margin_td:
+                gross_margin = float(gross_margin_td.find_next_sibling('td').text.replace('%', ''))
+            
+            revenue_growth_td = soup.find('td', text='营业收入同比增长')
+            if revenue_growth_td:
+                revenue_growth = float(revenue_growth_td.find_next_sibling('td').text.replace('%', ''))
+        except Exception as e:
+            st.warning(f"获取基本面数据失败 {symbol}: {str(e)[:50]}")
 
         # 2. 从腾讯财经获取实时行情数据
         url = f"http://qt.gtimg.cn/q={code}"
@@ -71,7 +79,7 @@ def get_realtime_data(symbol):
             return None
         data_str = text.split('"')[1]
         parts = data_str.split('~')
-        if len(parts) > 45:
+        if len(parts) > 50:
             return {
                 'name': parts[1],
                 'code': code,
@@ -83,7 +91,9 @@ def get_realtime_data(symbol):
                 'gross_margin': gross_margin,
                 'revenue_growth': revenue_growth,
                 'mkt_cap': float(parts[45]) if parts[45] and parts[45] != '' else 0,
-                'change': float(parts[32]) if parts[32] and parts[32] != '' else 0
+                'change': float(parts[32]) if parts[32] and parts[32] != '' else 0,
+                'sector': parts[51] if len(parts) > 51 else '',
+                'sector_code': parts[52] if len(parts) > 52 else ''
             }
     except Exception as e:
         st.warning(f"获取实时数据失败 {symbol}: {str(e)[:50]}")
@@ -145,38 +155,37 @@ def get_market_data():
     return None
 
 @st.cache_data(ttl=3600)
-def get_sector_data(symbol):
-    symbol = str(symbol).strip()
+def get_sector_data(symbol, sector_code):
     try:
-        # 获取股票所属板块
-        url = f"https://data.eastmoney.com/stockdata/{symbol}.html"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        r.encoding = 'utf-8'
-        soup = BeautifulSoup(r.text, 'html.parser')
-        sector = soup.find('div', class_='stock-bets').find('a', href=re.compile('/concept/')).text
-        
+        if not sector_code:
+            return None
+            
         # 获取板块最近10天数据
-        sector_code = re.findall(r'/concept/(.*?).html', soup.find('a', href=re.compile('/concept/'))['href'])[0]
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sector_code},day,,,10,qfq"
         r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            day_data = data.get('data', {}).get(sector_code, {}).get('qfqday', [])
-            if day_data and len(day_data) > 0:
-                df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                for col in ['open', 'close', 'high', 'low', 'volume']:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                # 计算板块最近5天涨幅
-                sector_change = df['close'].pct_change().tail(5).sum() * 100
-                # 计算板块资金流入（简化计算）
-                capital_inflow = (df['close'].iloc[-1] - df['close'].iloc[-6]) * df['volume'].tail(5).mean() / 100000000
-                return {
-                    'sector': sector,
-                    'sector_change': sector_change,
-                    'capital_inflow': capital_inflow
-                }
+        if r.status_code != 200:
+            return None
+        
+        data = r.json()
+        day_data = data.get('data', {}).get(sector_code, {}).get('qfqday', [])
+        if not day_data:
+            return None
+        
+        df = pd.DataFrame([row[:6] for row in day_data], columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        for col in ['open', 'close', 'high', 'low', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        # 计算板块最近5天涨幅
+        sector_change = df['close'].pct_change().tail(5).sum() * 100
+        # 计算板块资金流入（简化计算）
+        capital_inflow = (df['close'].iloc[-1] - df['close'].iloc[-6]) * df['volume'].tail(5).mean() / 100000000
+        
+        return {
+            'sector_change': sector_change,
+            'capital_inflow': capital_inflow
+        }
     except Exception as e:
         st.warning(f"获取板块数据失败 {symbol}: {str(e)[:50]}")
     return None
@@ -533,12 +542,15 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
 
     # 6. 板块信息分（5分，板块差异化）
     sector_score = 0
-    if sector_data and sector_data['sector_change'] > 0:
-        sector_score += 3
-        score_reason.append(f"板块信息：所属{sector_data['sector']}板块最近5天上涨{sector_data['sector_change']:.1f}%，加3分")
-    if sector_data and sector_data['capital_inflow'] > 0:
-        sector_score += 2
-        score_reason.append(f"板块信息：所属{sector_data['sector']}板块资金流入{sector_data['capital_inflow']:.1f}亿，加2分")
+    if sector_data and info.get('sector'):
+        if sector_data['sector_change'] > 0:
+            sector_score += 3
+            score_reason.append(f"板块信息：所属{info['sector']}板块最近5天上涨{sector_data['sector_change']:.1f}%，加3分")
+        if sector_data['capital_inflow'] > 0:
+            sector_score += 2
+            score_reason.append(f"板块信息：所属{info['sector']}板块资金流入{sector_data['capital_inflow']:.1f}亿，加2分")
+    else:
+        score_reason.append("板块信息：无法获取板块数据，加0分")
     score += sector_score
 
     # 7. 活跃资金分（5分，实时差异化）
@@ -591,8 +603,8 @@ def analyze_stock_logic(code, info, df, market_data, sector_data):
 # ==========================================
 # 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.8 (差异化精细版)")
-st.caption("差异化评分+准确回测：多维度精细评分+300天回测数据+全面维度分析")
+st.title("浩哥战法量化终端 v14.8 (修复版)")
+st.caption("修复板块数据获取错误+差异化评分+准确回测")
 
 # 获取大盘数据（只获取一次，提高速度）
 market_data = get_market_data()
@@ -611,7 +623,10 @@ if st.button("🚀 开始矩阵扫描"):
         for i, code in enumerate(codes):
             info = get_realtime_data(code)
             df = fetch_kline_data(code)
-            sector_data = get_sector_data(code)
+            sector_data = None
+            if info and info.get('sector_code'):
+                sector_data = get_sector_data(code, info['sector_code'])
+            
             if df is not None and info is not None:
                 res = analyze_stock_logic(code, info, df, market_data, sector_data)
                 if res:
