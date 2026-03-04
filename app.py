@@ -9,7 +9,7 @@ import time
 import socket
 import warnings
 
-# 压制Pandas的未来警告和弃用警告
+# 压制Pandas未来警告和弃用警告
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 socket.setdefaulttimeout(20)
 
 st.set_page_config(
-    page_title="浩哥战法量化终端 v14.7 (零警告零异常版)",
+    page_title="浩哥战法量化终端 v14.8 (稳定版)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -32,7 +32,7 @@ with st.sidebar:
         st.success("缓存已清除，请重新运行！")
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Connection': 'close'
 }
 
@@ -91,7 +91,7 @@ def fetch_kline_data(symbol):
     return None
 
 # ==========================================
-# 核心算法（严格对齐浩哥原意 + 修复所有警告/异常）
+# 核心算法（顺序修复 + 防AA KeyError + 防~float）
 # ==========================================
 def sma(series, n, m=1):
     return series.ewm(alpha=m/n, adjust=False).mean()
@@ -202,7 +202,7 @@ def calculate_indicators(df):
             (C < df['大哥黄线']) & (dist_yellow <= 0.8)
         )
 
-        # 浩哥六大B信号（严格原意阈值）
+        # 浩哥六大B信号
         df['拐头B'] = (
             df['做上涨趋势'] &
             (df['RSI'] - 15 >= df['RSI'].shift(1)) &
@@ -251,7 +251,7 @@ def calculate_indicators(df):
             ((df['J'] < 13) | (df['RSI'] < 18))
         )
 
-        # 砖型图（严格顺序：先AA → 再CC）
+        # 砖型图 - 严格顺序
         hhv4 = hhv(H, 4)
         llv4 = llv(L, 4)
         range4 = (hhv4 - llv4).replace(0, 0.01)
@@ -266,7 +266,7 @@ def calculate_indicators(df):
         # 先计算 AA
         df['AA'] = (df['砖型图'] > df['砖型图'].shift(1)).fillna(False).astype(bool)
 
-        # 再计算 CC（修复~float问题）
+        # 再计算 CC
         aa_shift = df['AA'].shift(1).fillna(False).astype(bool)
         df['CC'] = (~aa_shift) & df['AA']
         df['砖型起爆'] = df['CC']
@@ -285,12 +285,11 @@ def calculate_indicators(df):
     except Exception as e:
         st.warning(f"计算异常，但继续运行: {str(e)[:100]}")
 
-    # ffill/bfill 时强制类型推断，避免FutureWarning
     df = df.ffill().bfill().infer_objects(copy=False)
     return df
 
 # ==========================================
-# 矩阵回测（样本量过滤）
+# 矩阵回测
 # ==========================================
 TIER_MATRIX = {
     'low': {'min': 0, 'max': 12, 'base_score': 50},
@@ -302,7 +301,7 @@ def perform_matrix_backtest(df, current_price):
     if '数据不足' in df.columns and df['数据不足'].iloc[-1]:
         return None, {}, ["数据不足，无法回测"]
 
-    df_test = df.iloc[-120:-3]  # 避免未来数据泄露
+    df_test = df.iloc[-120:-3]
     strategies = ['拐头B', '缩量B', '原始B1', '超缩量B', '白线B', '黄线B']
 
     tier = 'mid'
@@ -331,7 +330,7 @@ def perform_matrix_backtest(df, current_price):
     return tier, backtest_result, history_report
 
 # ==========================================
-# 评分逻辑（组合加分）
+# 评分逻辑
 # ==========================================
 def analyze_stock_logic(code, info, df):
     if not info or df is None or df['数据不足'].iloc[-1]:
@@ -418,8 +417,8 @@ def analyze_stock_logic(code, info, df):
 # ==========================================
 # 主程序
 # ==========================================
-st.title("浩哥战法量化终端 v14.7 (零警告零异常版)")
-st.caption("核心升级：修复AA/CC计算顺序 + 压制所有警告 + 严格对齐浩哥原意")
+st.title("浩哥战法量化终端 v14.8 (稳定版)")
+st.caption("修复：AA/CC顺序 + ~float防护 + 绘图兼容 + 所有警告压制")
 
 codes_input = st.text_area("请输入股票代码（逗号或换行分隔，最多50只）", height=120)
 if st.button("🚀 开始矩阵扫描"):
@@ -463,21 +462,20 @@ if st.button("🚀 开始矩阵扫描"):
                     df_p = res['df'].iloc[-100:]
                     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.25, 0.20])
 
-                    # K线 + 趋势线
                     fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['open'], high=df_p['high'], low=df_p['low'], close=df_p['close'], name='K线'), row=1, col=1)
                     if '趋势白线' in df_p.columns:
                         fig.add_trace(go.Scatter(x=df_p.index, y=df_p['趋势白线'], line=dict(color='white', width=1.2), name='趋势白线'), row=1, col=1)
                     if '大哥黄线' in df_p.columns:
                         fig.add_trace(go.Scatter(x=df_p.index, y=df_p['大哥黄线'], line=dict(color='yellow', width=1.5), name='大哥黄线'), row=1, col=1)
 
-                    # 砖型图（用numpy array避免索引警告）
+                    # 砖型图
                     brick_vals = df_p['砖型图'].fillna(0).values
                     brick_colors = ['gray'] * len(brick_vals)
                     for i in range(1, len(brick_vals)):
                         if brick_vals[i] > 0 and brick_vals[i] >= brick_vals[i-1]:
-                            brick_colors[i] = '#ff3333'  # 红持
+                            brick_colors[i] = '#ff3333'
                         else:
-                            brick_colors[i] = '#33ff33'  # 绿空
+                            brick_colors[i] = '#33ff33'
 
                     fig.add_trace(go.Bar(x=df_p.index, y=brick_vals, marker_color=brick_colors, name='浩哥砖型图'), row=2, col=1)
 
@@ -487,7 +485,7 @@ if st.button("🚀 开始矩阵扫描"):
                         if not 起爆.empty:
                             fig.add_trace(go.Scatter(x=起爆.index, y=起爆['砖型图']*1.1, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold'), name='砖型起爆'), row=2, col=1)
 
-                    # 成交量（极缩变蓝）
+                    # 成交量
                     vol_colors = ['#00aaff' if r['浩哥极缩'] else 'gray' for _, r in df_p.iterrows()]
                     fig.add_trace(go.Bar(x=df_p.index, y=df_p['volume'], marker_color=vol_colors, name='成交量'), row=3, col=1)
 
@@ -498,7 +496,6 @@ if st.button("🚀 开始矩阵扫描"):
                         paper_bgcolor='#0e1117',
                         font=dict(color='#d1d4dc'),
                         xaxis_rangeslider_visible=False,
-                        showlegend=True,
-                        width='stretch'  # 替换 use_container_width
+                        showlegend=True
                     )
-                    st.plotly_chart(fig, width='stretch')
+                    st.plotly_chart(fig, use_container_width=True)
